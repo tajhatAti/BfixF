@@ -1,0 +1,43 @@
+# ---- Secrets (never commit) ----
+config.env
+.env
+.env.*
+!.env.example
+*.session
+*.session-journal
+*bot_session*
+StringSession*
+
+# ---- Runtime data (contains user/admin data + sessions) ----
+bot_db.json
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+backups/
+logs/
+*.log
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# ---- OS/Editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# demo env for the live preview (no real tokens)
+config.preview.env
