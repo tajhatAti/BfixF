@@ -63,7 +63,51 @@ def channels_body(flash: str = "", warn: str = "") -> str:
     <table><tr><th>চ্যানেল</th><th>ধরন</th><th>কার জন্য</th><th>ID</th><th>চালু</th><th></th></tr>
     {''.join(rows) or "<tr><td colspan=6 class='muted'>এখনো কোনো চ্যানেল যোগ করা হয়নি</td></tr>"}</table>
     <p class="row"><a class="btn" href="/admin/channels/compose">✍️ চ্যানেলে পোস্ট করুন</a>
-       <a class="btn grey" href="/admin/channels?refresh=1">🔄 আবার রিজলভ করুন</a></p>"""
+       <a class="btn grey" href="/admin/channels?refresh=1">🔄 আবার রিজলভ করুন</a></p>
+    {store_channels_card()}"""
+
+
+def store_channels_card() -> str:
+    """📡 প্রতি স্টোরের নিজের চ্যানেল — এক নজরে, এক ক্লিকে তৈরি।
+
+    Channel per store is what keeps one store's audience out of another's feed: the
+    cache channel, the publishing channel and the force-join gate can all be scoped to
+    a single store from here.
+    """
+    rows = []
+    for store in db.all_stores():
+        cache_key = db.get_meta(f"store_cache_channel:{store['id']}", "")
+        publish = store.get("publish_channel_id") or 0
+        known = db.chat_peer(int(cache_key)) if str(cache_key).lstrip("-").isdigit() else None
+        cache_cell = ("✅ <code>%s</code>" % esc(str(cache_key))) if cache_key else "⏳ তৈরি হয়নি"
+        if cache_key and not (known and known.get("access_hash")):
+            cache_cell += " <span class='pill'>হ্যাশ হয়নি</span>"
+        link = (f"<a class='btn grey' href='{esc(store.get('publish_channel_link'))}' "
+                f"target='_blank'>🔗</a>") if store.get("publish_channel_link") else ""
+        rows.append(
+            f"<tr><td>#{store['id']} · <b>{esc(store['name'])}</b></td>"
+            f"<td>{cache_cell}</td>"
+            f"<td>{('✅ <code>%s</code> %s' % (publish, link)) if publish else '⏳ তৈরি হয়নি'}</td>"
+            f"<td>{'✅ চালু' if store.get('auto_post_enabled') else '—'}</td>"
+            f"<td><div class='row'>"
+            f"<form method=post action='/admin/channels/store/{store['id']}/cache'>"
+            f"<button class='grey'>🎞 ক্যাশ চ্যানেল</button></form>"
+            f"<form method=post action='/admin/stores/{store['id']}/channel/create'>"
+            f"<button class='grey'>📣 পাবলিশ চ্যানেল</button></form>"
+            f"<form method=post action='/admin/channels/store/{store['id']}/cache/reset'>"
+            f"<button class='bad'>♻️ রিসেট</button></form>"
+            f"</div></td></tr>")
+    return f"""
+    <div class="page-heading"><div><p class="eyebrow">PER STORE</p>
+      <h2>🏪 প্রতি স্টোরের আলাদা চ্যানেল</h2></div></div>
+    <p class="muted">প্রতিটা স্টোরের ভিডিও আলাদা প্রাইভেট চ্যানেলে ক্যাশ হয় — এক স্টোরের
+    ভিডিও অন্য স্টোরের ইউজারের কাছে যায় না। চ্যানেলগুলো ইউজারবট নিজেই বানায় আর
+    বটকে অ্যাডমিন করে দেয়; তাই এখানে সাধারণত হাত দিতে হয় না। যদি লগে
+    <code>Could not find the input entity for PeerChannel</code> আসে, ♻️ রিসেট চেপে
+    আবার বানিয়ে নিন।</p>
+    <table><tr><th>স্টোর</th><th>ক্যাশ চ্যানেল</th><th>পাবলিশ চ্যানেল</th><th>অটো-পোস্ট</th><th></th></tr>
+    {''.join(rows) or "<tr><td colspan=5 class='muted'>এখনো কোনো স্টোর নেই</td></tr>"}</table>
+    """
 
 
 def compose_body(composer: dict, store_id: int | None, flash: str = "", warn: str = "") -> str:

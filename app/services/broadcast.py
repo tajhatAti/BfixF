@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 from telethon.errors import FloodWaitError
@@ -29,6 +30,8 @@ from app import config as cfg
 from app.logger import log
 from app.runtime import blocked_users, bot, spawn
 from app.services import settings
+
+from app.services.peers import Unreachable as peers_unreachable
 from app.services.telegram import safe_call
 from app.storage import db
 
@@ -108,7 +111,9 @@ def create_campaign(admin_id: int, *, text: str = "", title: str = "",
                     scheduled_at: float | None = None,
                     start: bool = True, buttons: str = "",
                     link_slug: str = "", caption_position: str = "above",
-                    online_button: int | None = None) -> dict:
+                    online_button: int | None = None,
+                    media: list[dict] | None = None, silent: bool = False,
+                    protect: bool = True, origin: str = "panel") -> dict:
     """Build a campaign and (optionally) put it in the queue right away.
 
     `buttons` is the admin's button text (`label | url` per line) — inline URL
@@ -126,7 +131,8 @@ def create_campaign(admin_id: int, *, text: str = "", title: str = "",
         admin_id, title=title, text=text or "", files=files,
         audience=audience or "all", status=status, scheduled_at=scheduled_at,
         buttons=buttons or "", slug=link_slug or "", media_caption=caption_position or "above",
-        online_button=online_button,
+        online_button=online_button, media=media, silent=1 if silent else 0,
+        protect=1 if protect else 0, origin=origin or "panel",
     )
     targets = resolve_audience(admin_id, audience or "all")
     db.add_campaign_items(campaign_id, targets)
@@ -198,21 +204,133 @@ class BlockedByUser(Exception):
     """The user blocked the bot / deleted the account — stop retrying them."""
 
 
-async def _send_to_user(campaign: dict, user_id: int) -> str:
+@dataclass
+class Payload:
+    """Everything a campaign needs to build one message (resolved once per run)."""
+    text: str = ""
+    buttons: list = field(default_factory=list)
+    file_ids: list[int] = field(default_factory=list)
+    media: list[dict] = field(default_factory=list)
+    silent: bool = False
+    protect: bool = True
+
+
+_payload_cache: dict[tuple[str, int], tuple[float, "Payload"]] = {}
+PAYLOAD_TTL = 120
+
+
+def _namespace() -> str:
+    """Cache key prefix: one database must never read another one's payload."""
+    return str(getattr(db, "path", "") or "")
+
+
+def campaign_payload(campaign: dict) -> Payload:
+    """Build (and briefly cache) the sendable payload of a campaign."""
+    campaign_id = int(campaign.get("id") or 0)
+    cache_key = (_namespace(), campaign_id)
+    hit = _payload_cache.get(cache_key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    payload = Payload(
+        text=campaign.get("text") or "",
+        buttons=campaign_buttons(campaign),
+        file_ids=list(campaign.get("file_ids") or []),
+        media=db.campaign_media(campaign_id) if campaign_id else [],
+        silent=bool(campaign.get("silent")),
+        protect=bool(campaign.get("protect", 1)),
+    )
+    if campaign_id:
+        _payload_cache[cache_key] = (time.time() + PAYLOAD_TTL, payload)
+    return payload
+
+
+def forget_payload(campaign_id: int) -> None:
+    _payload_cache.pop((_namespace(), int(campaign_id)), None)
+
+
+async def _source_messages(payload: Payload) -> list:
+    """Fetch the live messages for media the admin uploaded to the bot."""
+    from app.services.sender import source_message
+    found = []
+    for item in payload.media[:10]:
+        msg = await source_message(int(item.get("chat_id") or 0), int(item.get("msg_id") or 0))
+        if msg is not None and getattr(msg, "media", None):
+            found.append(msg)
+    return found
+
+
+async def _send_to_user(campaign: dict, user_id: int, payload: Payload | None = None) -> str:
     """Send one campaign message. Raises on failure so the queue can record it.
 
-    Media campaigns no longer depend on a userbot session: `deliver()` mirrors the
-    file once and then plain-sends it, so a broadcast to thousands of users really
-    reaches them (this used to silently fail for everyone but the admin). The
-    inline buttons — including the “online” one — are attached to the message.
-    """
-    from app.services.sender import deliver_file_id, send_text
+    Order of business:
 
-    file_ids = campaign.get("file_ids") or []
-    text = campaign.get("text") or ""
+    1. resolve the recipient into an ``InputPeerUser`` (the access-hash cache in
+       ``app/services/peers.py`` — without it a fresh session answers
+       “Could not find the input entity” for every single user),
+    2. media the admin uploaded/forwarded to the bot (single file or an album),
+    3. store files chosen in the panel,
+    4. text only.
+
+    The inline buttons — including the “online” one — ride along with whichever
+    form is used.
+    """
+    from app.services import peers
+    from app.services.sender import (deliver_file_id, send_album, send_source_media,
+                                     send_text)
+
+    try:
+        return await _attempt_send(campaign, user_id, payload, peers, deliver_file_id,
+                                   send_album, send_source_media, send_text)
+    except peers_unreachable:
+        raise
+    except Exception as exc:
+        reason = peers.unreachable_reason(str(exc))
+        if reason:
+            # “Could not find the input entity” is a *recipient* problem: remember
+            # it so the panel can explain it and the next broadcast skips them.
+            db.mark_unreachable(user_id, reason)
+            log.info("Campaign #%s: %s unreachable — %s", campaign.get("id"), user_id, reason)
+            raise peers_unreachable(reason) from exc
+        raise
+
+
+async def _attempt_send(campaign: dict, user_id: int, payload: "Payload | None",
+                        peers, deliver_file_id, send_album, send_source_media,
+                        send_text) -> str:
+    """The actual send; `_send_to_user` turns peer errors into readable reasons."""
+    payload = payload or campaign_payload(campaign)
+    file_ids = payload.file_ids
+    text = payload.text
     user = db.user(user_id) or {}
     body = personalize(text, user.get("name") or "", user.get("username") or "")
-    buttons = campaign_buttons(campaign) or None
+    buttons = payload.buttons or None
+    # Known unreachable (no access hash *and* already marked in the database):
+    # skip instantly instead of spending a network round trip per person.
+    if not peers.known_hash(user_id):
+        reason = peers.known_unreachable(user_id)
+        if reason:
+            raise peers_unreachable(reason)
+    peer = await peers.peer_for(user_id)
+
+    if payload.media:
+        messages = await _source_messages(payload)
+        if messages:
+            if len(messages) == 1:
+                await send_source_media(peer, messages[0], body, buttons,
+                                        silent=payload.silent, protect=payload.protect)
+            else:
+                await send_album(peer, messages, body,
+                                 silent=payload.silent, protect=payload.protect)
+                if buttons:
+                    # Telegram puts buttons nowhere near a grouped album, so the
+                    # links arrive in a short message right after it.
+                    note = (settings.get_str("BROADCAST_BUTTON_NOTE")
+                            or "👇 লিংক ও অপশন")
+                    await send_text(peer, note, buttons=buttons)
+            db.mark_reachable(user_id)
+            return "sent"
+        log.warning("campaign #%s: %s uploaded media item(s) unreadable — falling back",
+                    campaign.get("id"), len(payload.media))
 
     if file_ids:
         from app.services.sender import ensure_ready
@@ -233,7 +351,7 @@ async def _send_to_user(campaign: dict, user_id: int) -> str:
             preview_row = db.file(chosen[0])
             if preview_row is None:
                 raise RuntimeError("ফাইলটি মুছে ফেলা হয়েছে")
-            probe = await deliver_file_id(user_id, chosen[0], body, buttons=buttons)
+            probe = await deliver_file_id(peer, chosen[0], body, buttons=buttons)
             if not probe.ok:
                 # `blocked` means the recipient is unreachable; preserve the detail
                 # so the queue can explain what happened and offer a useful retry.
@@ -246,7 +364,7 @@ async def _send_to_user(campaign: dict, user_id: int) -> str:
 
         for index, file_id in enumerate(chosen[sent:], start=sent):
             caption = body if index == 0 else (runtime_caption() or "")
-            result = await deliver_file_id(user_id, file_id, caption, buttons=buttons)
+            result = await deliver_file_id(peer, file_id, caption, buttons=buttons)
             if not result.ok:
                 if sent:
                     break                     # partial send: don't mark as failed
@@ -256,8 +374,9 @@ async def _send_to_user(campaign: dict, user_id: int) -> str:
 
     if not text:
         raise RuntimeError("empty message")
-    message = await safe_call(bot.send_message, user_id, body, link_preview=False,
-                              buttons=buttons, what="broadcast", retries=2)
+    message = await safe_call(bot.send_message, peer, body, link_preview=False,
+                              buttons=buttons, silent=payload.silent,
+                              what="broadcast", retries=2)
     if message is None:
         raise RuntimeError("send returned nothing")
     return "sent"
@@ -268,6 +387,11 @@ async def _send_to_user(campaign: dict, user_id: int) -> str:
 #: Order matters: the most specific wording wins. (“cannot find any entity”
 #: happens for people who never pressed /start — a different problem from a block.)
 ERROR_HINTS = (
+    ("unreachable", "❓ এই ইউজারের কাছে পৌঁছানো যায় না — বট কখনো ওদের কাছ থেকে আপডেট পায়নি "
+                    "(ওরা বটে /start দেয়নি), তাই Telegram access hash দেয় না। "
+                    "/start দিলেই আবার পাঠানো যাবে"),
+    ("input entity", "❓ এই ইউজারের কাছে পৌঁছানো যায় না — Telegram access hash জানে না। "
+                     "ওদের বটে /start দিতে বলুন"),
     ("flood", "⏳ টেলিগ্রামের সাময়িক লিমিট (FloodWait) — কিছুক্ষণ পরে 🔁 Retry চাপলেই যাবে"),
     ("deactivated", "🪦 ইউজার অ্যাকাউন্ট ডিলিট/ডিঅ্যাক্টিভেট"),
     ("cannot find any entity", "❓ এই আইডিতে পৌঁছানো যায় না — সাধারণত বট কখনো /start করা হয়নি"),
@@ -398,12 +522,33 @@ async def run_campaign(campaign_id: int, progress: ProgressCb | None = None,
                                 campaign_id, fid, exc)
     flights: set[asyncio.Task] = set()
     stats = {"failed": 0, "last_error": ""}
+    payload = campaign_payload(campaign)
+    # Pacing: Telegram's bot limit is ~30 messages/second overall. Sending in
+    # batches of SEND_AT_ONCE with a short breather keeps us under it *before* a
+    # FloodWait happens, which is what makes a 5 000-user broadcast finish fast
+    # instead of crawling through 15-minute waits.
+    batch_size = max(1, settings.get_int("BROADCAST_BATCH", SEND_AT_ONCE))
+    batch_pause = max(0.0, settings.get_float("BROADCAST_BATCH_PAUSE", 1.0))
 
     async def _deliver_one(uid: int) -> None:
         try:
             try:
-                await _send_to_user(campaign, uid)
+                await _send_to_user(campaign, uid, payload)
                 db.mark_campaign_item(campaign_id, uid, "sent")
+            except peers_unreachable as exc:
+                # No access hash — known, explained, not retried 5 000 times.
+                reason = str(exc)
+                blocked_now = "block" in reason.lower()
+                if blocked_now:
+                    blocked_users.add(uid)
+                    db.mark_campaign_item(campaign_id, uid, "blocked", f"unreachable: {reason}")
+                else:
+                    stats["failed"] += 1
+                    detail = f"unreachable: {reason}"
+                    stats["last_error"] = f"{uid}: {detail}"
+                    db.mark_campaign_item(campaign_id, uid, "failed", detail)
+                db.mark_unreachable(uid, reason[:200])
+                log.info("Campaign #%s: %s is unreachable — %s", campaign_id, uid, reason)
             except FloodWaitError as exc:
                 # safe_call already waits; this is the "safety cap" escape hatch.
                 detail = f"flood {exc.seconds}s"
@@ -415,6 +560,7 @@ async def run_campaign(campaign_id: int, progress: ProgressCb | None = None,
                 kind = _classify(exc)
                 if kind == "blocked":
                     blocked_users.add(uid)
+                    db.mark_unreachable(uid, "blocked the bot")
                 else:
                     stats["failed"] += 1
                     stats["last_error"] = f"{uid}: {exc}"
@@ -430,11 +576,16 @@ async def run_campaign(campaign_id: int, progress: ProgressCb | None = None,
         index += 1
         if user_id in blocked_users and not retry_blocked:
             db.mark_campaign_item(campaign_id, user_id, "blocked", "known blocker")
-        else:
-            await gate.acquire()                      # wait for a free slot, then send
-            task = asyncio.ensure_future(_deliver_one(user_id))
-            flights.add(task)
-            task.add_done_callback(flights.discard)
+            continue
+        if batch_size < SEND_AT_ONCE and flights and len(flights) >= batch_size:
+            await asyncio.gather(*list(flights), return_exceptions=True)
+            flights.clear()
+            if batch_pause:
+                await asyncio.sleep(batch_pause)
+        await gate.acquire()                          # wait for a free slot, then send
+        task = asyncio.ensure_future(_deliver_one(user_id))
+        flights.add(task)
+        task.add_done_callback(flights.discard)
 
         if index == 1:
             db.log_event("broadcast_start", None, None, None, str(campaign_id),

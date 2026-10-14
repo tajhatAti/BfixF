@@ -13,7 +13,7 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient      # noqa: E402
 
 from app import config as cfg                  # noqa: E402
-from app.services import billing, broadcast    # noqa: E402
+from app.services import billing, broadcast, settings  # noqa: E402
 from app.storage import db                     # noqa: E402
 from tests.test_flows import ADMIN_ID, USER_ID  # noqa: E402
 
@@ -952,3 +952,76 @@ def test_emergency_actions_flip_the_switches(client):
     # no login, no switch
     denied = client.post("/admin/emergency/maintenance", data={"value": "1"}, follow_redirects=False)
     assert denied.status_code == 303 and settings.get_bool("MAINTENANCE_MODE", False) is False
+
+
+# ------------------------------------------------------ admin shell & panel UI
+def test_the_sidebar_groups_every_admin_page(client):
+    """The panel is organised in collapsible groups — no page without a link."""
+    page = client.get("/admin", headers=_auth()).text
+    for href in ("/admin/stores", "/admin/files", "/admin/channels", "/admin/reel",
+                 "/admin/broadcast", "/admin/users", "/admin/orders", "/admin/links",
+                 "/admin/analytics", "/admin/self-test", "/admin/logs", "/admin/download",
+                 "/admin/settings", "/admin/texts", "/admin/security", "/admin/session",
+                 "/admin/emergency"):
+        assert f'href="{href.lstrip("/")}"' in page or f'href="{href}"' in page, href
+    assert page.count("navgrp") >= 5, "the groups must be collapsible"
+    assert "open" in page, "the group holding the current page is expanded"
+
+
+def test_the_quick_actions_are_on_the_overview(client):
+    page = client.get("/admin", headers=_auth()).text
+    assert "quick" in page
+    for label in ("Create store", "Videos &amp; files", "New broadcast", "Home page reel"):
+        assert label in page, label
+
+
+def test_the_panel_theme_is_monochrome(client):
+    """Nothing in the workspace theme paints with a colour: black, white, grey."""
+    from web.dashboard import ADMIN_THEME_CSS
+    assert "--accent:#111111" in ADMIN_THEME_CSS
+    assert "#245bd6" not in ADMIN_THEME_CSS      # the old blue is gone
+    assert "#0f766e" not in ADMIN_THEME_CSS
+    # (the comment mentions the word — the *rules* must not use one)
+    assert "linear-gradient(" not in ADMIN_THEME_CSS
+    assert "radial-gradient(" not in ADMIN_THEME_CSS
+    assert "printed page" in ADMIN_THEME_CSS
+
+
+def test_the_overview_explains_broadcast_reachability(client):
+    db.touch_user(USER_ID, "Reachable", "reach")
+    db.touch_user(USER_ID + 1, "Silent", None)
+    db.set_user_peer(USER_ID, 123456789)
+    page = client.get("/admin", headers=_auth()).text
+    assert "ইউজারের কাছে ব্রডকাস্ট পৌঁছাবে" in page or "সব" in page
+
+
+# ------------------------------------------------- per-store channel dashboard
+def test_the_channels_page_lists_one_row_per_store(client):
+    store = db.create_store(ADMIN_ID, "Alpha store")
+    db.create_store(ADMIN_ID, "Beta store")
+    db.set_meta(f"store_cache_channel:{store['id']}", "-1001900000001")
+    db.set_chat_peer(-1001900000001, 987, "Alpha - media")
+
+    page = client.get("/admin/channels", headers=_auth()).text
+    assert "প্রতি স্টোরের আলাদা চ্যানেল" in page
+    assert "Alpha store" in page and "Beta store" in page
+    assert "-1001900000001" in page
+    # links are base-relative on purpose (see app/services/basepath.py)
+    assert "channels/store/" in page and "cache/reset" in page
+
+
+def test_resetting_a_store_cache_channel_forgets_the_pair(client):
+    store = db.create_store(ADMIN_ID, "Reset me")
+    db.set_meta(f"store_cache_channel:{store['id']}", "-1001900000009")
+
+    response = client.post(f"/admin/channels/store/{store['id']}/cache/reset",
+                           headers=_auth(), follow_redirects=False)
+    assert response.status_code == 303
+    assert db.get_meta(f"store_cache_channel:{store['id']}", "") == ""
+
+
+def test_the_cache_warning_is_shown_on_the_channels_page(client):
+    settings.set("STORAGE_CHANNEL_WARNING", "ক্যাশ চ্যানেল পাওয়া যাচ্ছে না — STORAGE_CHANNEL দিন")
+    page = client.get("/admin/channels", headers=_auth()).text
+    assert "STORAGE_CHANNEL দিন" in page
+    settings.set("STORAGE_CHANNEL_WARNING", "")

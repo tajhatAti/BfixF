@@ -34,6 +34,9 @@ SCREENS = [
     "rq:1", "up:0", "cu:0", "ast:1", "rqd:1", "shr:1", "scp:1", "gd:1",
     "lg:1", "lgp:1", "lgt:1", "plan:1", "adm:setk:BROADCAST_MAX_FILES",
     "tx:home", "tx:g:0", "tx:k:home_banner",
+    # v3.1 broadcast studio / media inbox / home-page reel
+    "br:home", "br:audmenu", "br:preview", "br:media", "bm:use:1", "re:list", "re:count",
+    "br:who", "br:why", "br:queue", "br:unsched:1", "br:retrylast", "hint:br", "hint:bm",
 ]
 
 
@@ -64,6 +67,8 @@ def seeded(tmp_path, monkeypatch):
     db.set_store_forcejoin(store["id"], "@store_channel")
     db.add_join_channel(None, "@global_channel")
     db.touch_user(USER_ID, "Rahim", "rahim")
+    db.add_bc_media(-100, 77, "video", "promo.mp4", 2048)
+    db.add_feed_pin(-100, 78, "video", "owner pick")
     db.touch_user(ADMIN_ID, "Owner", "owner")
     db.grant(store["id"], USER_ID, time.time() + 86400, "test")
     return {"store": db.store(store["id"]), "file": file_id, "order": order_id,

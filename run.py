@@ -28,7 +28,8 @@ from app.logger import log, setup_logging
 from app.services import credentials, secrets_guard
 from app.storage import db
 
-HANDLER_MODULES = ("app.handlers.guard", "app.handlers.br", "app.handlers.admin", "app.handlers.billing",
+HANDLER_MODULES = ("app.handlers.peers", "app.handlers.guard", "app.handlers.br",
+                   "app.handlers.reel", "app.handlers.admin", "app.handlers.billing",
                    "app.handlers.extras", "app.handlers.inline", "app.handlers.linkpanel",
                    "app.handlers.manage", "app.handlers.messages", "app.handlers.panel_v3",
                    "app.handlers.user")

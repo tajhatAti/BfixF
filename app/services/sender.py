@@ -61,7 +61,81 @@ class Delivery:
 _SOURCE_CACHE: dict[tuple[int, int], tuple[float, object]] = {}
 
 
-async def _send_media(chat_id: int, media, caption_text: str, buttons=None) -> None:
+async def source_message(chat_id: int, msg_id: int, ttl: int = 300):
+    """Fetch (and cache for a few minutes) a message we may send from.
+
+    Used by the broadcast engine for media the admin uploaded/forwarded to the bot:
+    the campaign stores only `(chat_id, msg_id)`, so the queue survives a restart
+    without re-uploading anything.
+    """
+    if not chat_id or not msg_id:
+        return None
+    key = (int(chat_id), int(msg_id))
+    hit = _SOURCE_CACHE.get(key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    try:
+        msg = await safe_call(bot.get_messages, int(chat_id), ids=int(msg_id),
+                              what="get_messages", retries=1)
+    except Exception as exc:
+        log.debug("source message %s/%s unavailable: %s", chat_id, msg_id, exc)
+        return None
+    if msg is not None and getattr(msg, "media", None):
+        _SOURCE_CACHE[key] = (time.time() + ttl, msg)
+        return msg
+    return None
+
+
+def random_id() -> int:
+    """A non-zero 63-bit id Telegram uses to de-duplicate album sends."""
+    from secrets import randbits
+    return randbits(63) or 1
+
+
+async def send_album(chat_id, messages: list, caption_text: str = "", buttons=None,
+                     silent: bool = False, protect: bool = True) -> None:
+    """One message with several photos/videos (Telegram groups them itself).
+
+    Built by hand for the same reason as `_send_media`: `noforwards` and `silent`
+    have to reach the API, and a caption belongs to the *first* item only.
+
+    Telegram does not allow inline buttons on a grouped album, so callers that want
+    buttons send them in a short follow-up message instead (see
+    `broadcast._send_to_user`).
+    """
+    from telethon import utils
+    from telethon.extensions import html
+    from telethon.tl import functions
+    from telethon.tl.types import InputSingleMedia
+
+    peer = await safe_call(bot.get_input_entity, chat_id, what="get_input_entity", retries=1)
+    text, entities = html.parse(caption_text or "")
+    media_items = []
+    for index, message in enumerate(messages[:10]):
+        media_items.append(InputSingleMedia(
+            media=utils.get_input_media(message.media),
+            random_id=random_id(),
+            message=text if index == 0 else "",
+            entities=entities if index == 0 else [],
+        ))
+    request = functions.messages.SendMultiMediaRequest(
+        peer=peer, multi_media=media_items, silent=bool(silent),
+        noforwards=bool(protect),
+    )
+    await safe_call(bot, request, what="send_album")
+
+
+async def send_source_media(chat_id, message, caption_text: str = "", buttons=None,
+                            silent: bool = False, protect: bool = True) -> None:
+    """Send one fetched message (photo/video/document) with caption + buttons."""
+    if not message or not getattr(message, "media", None):
+        raise RuntimeError("source: media not available")
+    await _send_media(chat_id, message.media, caption_text, buttons,
+                      silent=silent, protect=protect)
+
+
+async def _send_media(chat_id: int, media, caption_text: str, buttons=None,
+                      silent: bool = False, protect: bool = True) -> None:
     """Send media with forward-protection.
 
     Note: `send_file(..., noforwards=True)` is silently ignored by Telethon (it
@@ -83,25 +157,26 @@ async def _send_media(chat_id: int, media, caption_text: str, buttons=None) -> N
                 await safe_call(
                     bot, functions.messages.SendMediaRequest(
                         peer=peer, media=input_media, message=text,
-                        entities=entities, noforwards=True, reply_markup=reply_markup,
+                        entities=entities, noforwards=bool(protect), silent=bool(silent),
+                        reply_markup=reply_markup,
                     ),
-                    what="send_media(noforwards+buttons)",
+                    what="send_media(protected+buttons)",
                 )
                 return
         await safe_call(
             bot, functions.messages.SendMediaRequest(
                 peer=peer, media=input_media, message=text,
-                entities=entities, noforwards=True,
+                entities=entities, noforwards=bool(protect), silent=bool(silent),
             ),
-            what="send_media(noforwards)",
+            what="send_media(protected)",
         )
         return
     except Exception as exc:
         log.debug("noforwards send failed (%s) — falling back to send_file", exc)
 
     await safe_call(
-        bot.send_file, chat_id, media,
-        caption=caption_text or None, buttons=buttons or None, what="send_file",
+        bot.send_file, chat_id, media, caption=caption_text or None,
+        buttons=buttons or None, silent=bool(silent), what="send_file",
     )
 
 

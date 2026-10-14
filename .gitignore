@@ -19,6 +19,9 @@ bot_db.json
 backups/
 logs/
 *.log
+# ---- Seeded preview media (tools/seed_demo.py) ----
+demo_media/
+.cache/
 
 # ---- Python ----
 __pycache__/
