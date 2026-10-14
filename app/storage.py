@@ -708,9 +708,15 @@ class Database:
             "VALUES(?, ?, ?, ?, 1)",
             (admin_id, name, self._free_slug(name), time.time()),
         )
-        return dict(self._one(
+        store = dict(self._one(
             "SELECT * FROM stores WHERE admin_id = ? AND name = ?", (admin_id, name)
         ))
+        # Audit trail (services/audit) reads these names straight off `events`.
+        # NOTE: audit rows keep `store_id` empty on purpose — the funnel/analytics
+        # queries count any event that carries a store id, and an admin action is
+        # not a visitor walking through the funnel. The store lives in `ref`.
+        self.log_event("store_created", admin_id, None, None, f"s{store['id']} {name}")
+        return store
 
     def store(self, store_id: int) -> dict | None:
         return self._dict(self._one("SELECT * FROM stores WHERE id = ?", (store_id,)))
@@ -774,6 +780,7 @@ class Database:
         self._run("DELETE FROM referral_cfg WHERE store_id = ?", (store_id,))
         self._run("DELETE FROM admin_state WHERE active_store_id = ?", (store_id,))
         self._run("DELETE FROM stores WHERE id = ?", (store_id,))
+        self.log_event("store_deleted", None, None, None, f"s{store_id}")
 
     def store_stats(self, store_id: int) -> dict:
         row = self._one(
@@ -871,6 +878,36 @@ class Database:
             "LEFT JOIN stores s ON s.id = f.store_id "
             "ORDER BY f.views DESC LIMIT ?", (limit,)
         )]
+
+    def dead_files(self, days: int = 30, limit: int = 40) -> list[dict]:
+        """Files nobody watched at all in the window — the “এই ফাইলগুলো বেকার” report.
+
+        A file counts as dead when it has zero `deliver` events since `days` ago
+        *and* zero lifetime views, so brand-new uploads are not accused of being
+        unwanted before anyone has had a chance to see them.
+        """
+        since = time.time() - max(1, int(days)) * 86400
+        return [dict(r) for r in self._q(
+            "SELECT f.*, s.name AS store_name, "
+            "  (SELECT COUNT(*) FROM events e WHERE e.file_id = f.id "
+            "     AND e.name = 'deliver' AND e.ts >= ?) AS recent_delivers, "
+            "  (SELECT COUNT(*) FROM events e WHERE e.file_id = f.id "
+            "     AND e.name = 'open_store') AS store_opens "
+            "FROM files f LEFT JOIN stores s ON s.id = f.store_id "
+            "WHERE COALESCE(f.views, 0) = 0 "
+            "ORDER BY f.created_at ASC LIMIT ?", (since, max(1, int(limit))))]
+
+    def conversion_rate(self, days: int = 30) -> dict:
+        """Free → paid conversion: how many people who came actually bought."""
+        since = time.time() - max(1, int(days)) * 86400
+        came = self._one("SELECT COUNT(DISTINCT user_id) AS c FROM events "
+                         "WHERE ts >= ? AND name IN ('start','open_store')", (since,))
+        paid = self._one("SELECT COUNT(DISTINCT user_id) AS c FROM events "
+                         "WHERE ts >= ? AND name = 'paid'", (since,))
+        came_n = int((came or {"c": 0})["c"] or 0)
+        paid_n = int((paid or {"c": 0})["c"] or 0)
+        return {"came": came_n, "paid": paid_n,
+                "rate": (paid_n / came_n * 100) if came_n else 0.0}
 
     def store_id_of_file(self, file_id: int) -> int | None:
         row = self._one("SELECT store_id FROM files WHERE id = ?", (file_id,))
@@ -1040,6 +1077,9 @@ class Database:
             "source = excluded.source",
             (store_id, user_id, expires_at, time.time(), source),
         )
+        # “কে এই অ্যাক্সেসটা দিল” — shown on /admin/audit.
+        self.log_event("grant", user_id, None, None, f"s{store_id} {source}",
+                       "lifetime" if expires_at is None else "expires")
 
     def extend_grant(self, store_id: int, user_id: int, days: int, source: str = "referral") -> float:
         """Add days on top of a still valid grant (instead of overwriting it)."""
@@ -1056,8 +1096,9 @@ class Database:
         self.grant(store_id, user_id, new_expiry, source)
         return new_expiry
 
-    def revoke(self, store_id: int, user_id: int) -> None:
+    def revoke(self, store_id: int, user_id: int, source: str = "admin") -> None:
         self._run("DELETE FROM grants WHERE store_id = ? AND user_id = ?", (store_id, user_id))
+        self.log_event("revoke", user_id, None, None, f"s{store_id} {source}")
 
     def grant_row(self, store_id: int, user_id: int) -> dict | None:
         return self._dict(self._one(
@@ -1574,11 +1615,14 @@ class Database:
             "ON CONFLICT(user_id) DO UPDATE SET reason = excluded.reason, banned_at = excluded.banned_at, banned_by = excluded.banned_by",
             (user_id, reason, time.time(), banned_by),
         )
+        self.log_event("user_banned", user_id, None, None, reason or "admin",
+                       f"by {banned_by}")
         # Also revoke all grants
         self._run("DELETE FROM grants WHERE user_id = ?", (user_id,))
 
     def unban_user(self, user_id: int) -> None:
         self._run("DELETE FROM banned WHERE user_id = ?", (user_id,))
+        self.log_event("user_unbanned", user_id, None, None, "admin")
 
     def is_banned(self, user_id: int) -> bool:
         return bool(self._one("SELECT 1 FROM banned WHERE user_id = ?", (user_id,)))

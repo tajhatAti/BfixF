@@ -50,6 +50,7 @@ from app import config as cfg                                                 # 
 from app import runtime                                                       # noqa: E402
 from app.logger import log, setup_logging                                     # noqa: E402
 from app.services import quickcast as quickcast_service                          # noqa: E402
+from app.services import audit as audit_service                                   # noqa: E402
 from app.services import (access, basepath, billing, bot_texts, broadcast,    # noqa: E402
                           channels, credentials, feed as feed_service, forcejoin,
                           secrets_guard, settings)
@@ -353,7 +354,9 @@ ADMIN_NAV = (
                       ("/admin/orders", "▧", "Orders"), ("/admin/links", "⌁", "Share links"),
                       ("/admin/digest", "◫", "Weekly digest"))),
     ("📊 হিসাব", (("/admin/analytics", "▥", "Analytics"), ("/admin/self-test", "✓", "System health"),
-                   ("/admin/logs", "≡", "Activity logs"), ("/admin/download", "⇩", "Exports"))),
+                   ("/admin/logs", "≡", "Activity logs"),
+                   ("/admin/audit", "🧾", "Admin audit"),
+                   ("/admin/download", "⇩", "Exports"))),
     ("⚙ সেটিংস", (("/setup", "⚙", "Bot connection"), ("/admin/session", "◌", "Telegram session"),
                     ("/admin/settings", "☰", "Preferences"), ("/admin/texts", "✎", "Bot messages"),
                     ("/admin/security", "◇", "Security"))),
@@ -367,6 +370,7 @@ ADMIN_QUICK = (
     ("🎞", "Home page reel", "/admin/reel", "অটো-প্লে, ওয়াল ও পিন করা মিডিয়া"),
     ("◉", "Channels", "/admin/channels", "প্রতি স্টোরের আলাদা চ্যানেল"),
     ("📲", "Telegram session", "/admin/session", "বট ও ইউজারবট সংযোগ"),
+    ("🧾", "Admin audit", "/admin/audit", "কে কী করল — সম্পূর্ণ হিসাব"),
 )
 
 # Two separate looks. Visitors: minimal black + gold. Admin / setup / sign-in: light paper
@@ -1403,11 +1407,23 @@ def create_app() -> FastAPI:
                                   "<p class='muted'>এখনো কিছু যোগ করা হয়নি — শীঘ্রই আসছে।</p>",
                           "/watch")
         chosen = next((row for row in items if row.get("key") == item), items[0])
+        # The hero obeys the same playback switches as the home-page wall (Admin →
+        # Home page reel) instead of hard-coding autoplay: browsers only allow a
+        # muted autoplay, and some owners prefer click-to-play.
+        play = feed_service.playback()
+        attrs = ["id=\"hero-media\"", "controls", "playsinline",
+                 f'preload="{ "auto" if play["autoplay"] else "metadata" }"']
+        if play["autoplay"]:
+            attrs.append("autoplay")
+        if play["muted"]:
+            attrs.append("muted")
+        if play["loop"]:
+            attrs.append("loop")
         if chosen.get("media_kind") == "photo":
             hero = (f'<img id="hero-media" src="{esc(chosen.get("stream") or "")}" '
                     f'alt="{esc(chosen.get("name") or "")}">')
         else:
-            hero = (f'<video id="hero-media" controls autoplay muted loop playsinline '
+            hero = (f'<video {" ".join(attrs)} '
                     f'poster="{esc(chosen.get("thumb") or "")}" '
                     f'src="{esc(chosen.get("stream") or "")}"></video>')
         bot_link = chosen.get("bot_link") or ""
@@ -1449,8 +1465,10 @@ def create_app() -> FastAPI:
                 hero.play().catch(function(){{}});
               }} else {{
                 var video = document.createElement('video');
-                video.id = 'hero-media'; video.controls = true; video.muted = true;
-                video.loop = true; video.playsInline = true;
+                video.id = 'hero-media'; video.controls = true;
+                video.muted = {str(play["muted"]).lower()};
+                video.loop = {str(play["loop"]).lower()};
+                video.playsInline = true;
                 video.poster = tile.dataset.thumb || ''; video.src = stream;
                 hero.replaceWith(video); video.play().catch(function(){{}});
               }}
@@ -1783,6 +1801,8 @@ def create_app() -> FastAPI:
         runtime.register_client(admin_id, client, me.id, me.first_name or "")
         PENDING_SESSIONS.pop(admin_id, None)
         log.info("Telegram user session connected from website for admin %s", admin_id)
+        audit_service.record("session_start", user_id=admin_id, ref=str(me.id),
+                             detail=me.first_name or "")
         return me.first_name or "Telegram account"
 
     @app.post("/admin/session/verify")
@@ -2256,6 +2276,8 @@ def create_app() -> FastAPI:
                            scheduled_at=None, finished_at=None, last_error="")
         db.campaign_counts(campaign_id)
         broadcast.start_campaign(campaign_id)
+        audit_service.record("broadcast_start", ref=str(campaign_id),
+                             detail=f"audience={campaign.get('audience')}")
         return RedirectResponse(f"/admin/broadcast/{campaign_id}?flash=🚀+শুরু+হয়েছে",
                                 status_code=303)
 
@@ -2265,6 +2287,7 @@ def create_app() -> FastAPI:
         if blocked:
             return blocked
         broadcast.cancel_campaign(campaign_id)
+        audit_service.record("broadcast_cancelled", ref=str(campaign_id))
         return RedirectResponse(f"/admin/broadcast/{campaign_id}?flash=⏹+থামানো+হলো",
                                 status_code=303)
 
@@ -2418,6 +2441,8 @@ def create_app() -> FastAPI:
             message += " Telegram channel তৈরি হয়েছে।"
             if result.get("warning"):
                 message += " " + result["warning"]
+        audit_service.record("store_created", store_id=store["id"], ref=name,
+                             detail=f"premium={store['is_premium']} channel={bool(create_channel)}")
         return RedirectResponse(f"/admin/stores/{store['id']}?flash=" + quote_plus(message),
                                 status_code=303)
 
@@ -2438,6 +2463,8 @@ def create_app() -> FastAPI:
             return RedirectResponse(f"/admin/stores/{store_id}?warn=এই+নামে+আরেকটি+store+আছে", status_code=303)
         db.update_store(store_id, name=name, description=(description or "").strip()[:2000],
                         is_premium=1 if str(is_premium) == "1" else 0)
+        audit_service.record("store_edited", store_id=store_id, ref=name,
+                             detail=f"premium={is_premium == '1'}")
         return RedirectResponse(f"/admin/stores/{store_id}?flash=তথ্য+সংরক্ষণ+হয়েছে", status_code=303)
 
     @app.post("/admin/stores/{store_id}/channel/create")
@@ -3000,6 +3027,9 @@ def create_app() -> FastAPI:
         if errors:
             joined = "+".join(f"{key}:{msg}" for key, msg in errors.items())
             return RedirectResponse(f"/admin/settings?warn={joined}", status_code=303)
+        changed = [key for key, value in values.items() if value != settings.get_str(key)]
+        audit_service.record("settings_saved", ref=group_key,
+                             detail=", ".join(changed[:12]) or "কোনো পরিবর্তন নেই")
         return RedirectResponse(
             f"/admin/settings?flash=✅+{group.label}+সেভ+হলো", status_code=303)
 
@@ -3187,8 +3217,10 @@ def create_app() -> FastAPI:
         if not peer:
             return RedirectResponse(
                 "/admin/channels?warn=চ্যানেল+বানানো+গেল+না+—+session/লগ+দেখুন", status_code=303)
+        audit_service.record("cache_channel_created", store_id=store_id, ref=str(peer),
+                             detail=store["name"])
         return RedirectResponse(
-            f"/admin/channels?flash=✅+{esc(store['name'])}+এর+ক্যাশ+চ্যানেল+তৈরি+হলো", 
+            f"/admin/channels?flash=✅+{esc(store['name'])}+এর+ক্যাশ+চ্যানেল+তৈরি+হলো",
             status_code=303)
 
     @app.post("/admin/channels/store/{store_id}/cache/reset")
@@ -3203,6 +3235,7 @@ def create_app() -> FastAPI:
         if blocked:
             return blocked
         db.set_meta(f"store_cache_channel:{int(store_id)}", "")
+        audit_service.record("cache_channel_reset", store_id=store_id, ref=str(store_id))
         return RedirectResponse(
             "/admin/channels?flash=♻️+রিসেট+হলো+—+পরের+ক্যাশ+থেকে+নতুন+চ্যানেল",
             status_code=303)
@@ -3390,6 +3423,8 @@ def create_app() -> FastAPI:
         if not ok:
             return RedirectResponse(f"/admin/texts?lang={lang}&warn={esc(error)}",
                                     status_code=303)
+        audit_service.record("texts_saved", ref=f"{key}:{lang}",
+                             detail=value.strip()[:80] or "ডিফল্ট")
         label = "♻️ ডিফল্ট ফিরে এসেছে" if value.strip() in ("", "-") else "✅ সেভ হয়েছে"
         return RedirectResponse(f"/admin/texts?lang={lang}&flash={esc(label)}",
                                 status_code=303)
@@ -3493,6 +3528,9 @@ def create_app() -> FastAPI:
         settings_service.set("FEED_COUNT", str(max(1, min(8, int(count or 4)))))
         settings_service.set("FEED_WALL", str(max(0, min(8, int(wall or 0)))))
         settings_service.set("FEED_GALLERY_COUNT", str(max(4, min(120, int(gallery or 36)))))
+        audit_service.record("reel_saved", ref=f"wall={wall}",
+                             detail=f"autoplay={bool(autoplay)} muted={bool(muted)} "
+                                    f"count={count} gallery={gallery}")
         return RedirectResponse("/admin/reel?flash=সেভ+হলো", status_code=303)
 
     @app.post("/admin/reel/up/{pin_id}")
@@ -3597,6 +3635,7 @@ def create_app() -> FastAPI:
         label = f"{max_clicks} ক্লিক" if max_clicks else "আনলিমিটেড"
         if per_user:
             label += f" · প্রতি ইউজার {per_user}"
+        audit_service.record("link_created", ref=token, detail=label)
         return RedirectResponse(
             f"/admin/links?flash=🔗+তৈরি:+{label}+·+{token}", status_code=303)
 
@@ -3710,6 +3749,14 @@ def create_app() -> FastAPI:
         checks = await panels.self_test()
         note = f'<div class="flash">{esc(flash)}</div>' if flash else ""
         return layout("Self test", note + panels.self_test_body(checks), "/admin/self-test")
+
+    @app.get("/admin/audit", response_class=HTMLResponse)
+    async def admin_audit(request: Request, name: str = "", days: int = 30):
+        """Who did what — the trail an owner needs when several people share the panel."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        return layout("Admin audit", panels.audit_body(name=name, days=days), "/admin/audit")
 
     @app.get("/admin/logs", response_class=HTMLResponse)
     async def admin_logs(request: Request, level: str = "", lines: int = 300):

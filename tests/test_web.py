@@ -1025,3 +1025,31 @@ def test_the_cache_warning_is_shown_on_the_channels_page(client):
     page = client.get("/admin/channels", headers=_auth()).text
     assert "STORAGE_CHANNEL দিন" in page
     settings.set("STORAGE_CHANNEL_WARNING", "")
+
+
+def test_the_watch_hero_follows_the_reel_settings(client):
+    """Hero playback is not hard-coded — the reel page decides autoplay/muted/loop."""
+    store = _store("Watcher")
+    db.add_file(store["id"], "Vid", "Video", -100, 7, size=3_000_000)
+    settings._cache.clear()
+    settings.set("FEED_AUTOPLAY", "1")
+    settings.set("FEED_MUTED", "1")
+    settings.set("FEED_LOOP", "1")
+    on = client.get("/watch").text
+    assert "autoplay" in on and "muted" in on and "loop" in on
+
+    settings.set("FEED_AUTOPLAY", "0")
+    settings.set("FEED_MUTED", "0")
+    settings.set("FEED_LOOP", "0")
+    off = client.get("/watch").text
+    assert '<video id="hero-media" controls playsinline' in off
+    assert "autoplay" not in off.split("hero-media")[1][:120]
+
+
+def test_deleting_a_user_removes_the_ban_too(client):
+    _store("Cleanup")
+    db.ban_user(USER_ID, "spam", ADMIN_ID)
+    db.touch_user(USER_ID, "spam", "sp")
+    assert db.is_banned(USER_ID)
+    assert db.delete_user(USER_ID) is True
+    assert db.is_banned(USER_ID) is False

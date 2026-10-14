@@ -236,15 +236,18 @@ def _remember_entity(entity) -> None:
                             "channel" if peers.is_channel_id(peer_id) else "chat")
 
 
+#: One sentence the panel, the bot and the log all reuse — the cure is always this.
+_CHANNEL_FIX = ("ঠিক করার উপায়: বটে <code>/storageset probe</code> (অথবা <code>/storageset "
+                "@channelname</code>) দিন, ওয়েবসাইটের 📡 Channels পেজে “♻️ রিসেট” চাপুন, "
+                "নাহলে <code>/storageset auto</code> দিয়ে প্রতি স্টোরের আলাদা চ্যানেলে "
+                "ফিরে যান — সেশন নিজেই নতুন চ্যানেল বানিয়ে বটকে অ্যাডমিন করে দেবে।")
+
+
 async def _note_channel_problem(peer) -> None:
     """Turn “Could not find the input entity for PeerChannel(…)” into a to-do list."""
     from app.services import settings as settings_service
     text = (f"ক্যাশ চ্যানেল ({peer}) খুলতে পারছে না — Telegram অ্যাক্সেস হ্যাশ জানে না। "
-            "ঠিক করার উপায়: (১) সেটিংসে STORAGE_CHANNEL-এ চ্যানেলের @username বা "
-            "-100… আইডি দিন (ইউজারবট ও বট দুজনেই যেখানে অ্যাডমিন), (২) অথবা বটে "
-            "/storageset দিয়ে চ্যানেল সেট করুন, (৩) নাহলে স্টোর পেজ থেকে "
-            "“📡 চ্যানেল বানাও” চাপুন — সেশন নিজেই নতুন চ্যানেল বানিয়ে বটকে অ্যাডমিন "
-            "করে দেবে।")
+            + _CHANNEL_FIX.replace("<code>", "").replace("</code>", ""))
     log.warning("storage channel unreachable: %s", text)
     try:
         settings_service.set("STORAGE_CHANNEL_WARNING", text[:400])

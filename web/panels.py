@@ -184,6 +184,13 @@ def analytics_body(days: int = 14) -> str:
         f"<td>{db.unique_viewers(f['id'])}</td><td>{f['views']}</td>"
         f"<td><a class='btn grey' href='/admin/analytics/file/{f['id']}'>কে দেখেছে</a></td></tr>"
         for f in top_files)
+    conversion = db.conversion_rate(days)
+    dead = db.dead_files(days=days)
+    dead_rows = "".join(
+        f"<tr><td>#{d['id']} · {esc(d['name'])}</td><td>{esc(d.get('store_name') or '')}</td>"
+        f"<td>{esc(d.get('kind') or '')}</td><td>{_start(d.get('created_at'))}</td>"
+        f"<td><a class='btn grey' href='/admin/analytics/file/{d['id']}'>বিস্তারিত</a></td></tr>"
+        for d in dead[:20])
     event_rows = "".join(
         f"<tr><td>{esc(fmt_ts(e['ts'], '%d %b %H:%M'))}</td>"
         f"<td>{_user_link(e.get('user_id'), e.get('user_name'))}</td>"
@@ -198,7 +205,15 @@ def analytics_body(days: int = 14) -> str:
       {_card("ভিডিও পাঠানো", counts.get("deliver", 0))}
       {_card("স্টোর ওপেন", counts.get("open_store", 0))}
       {_card("পেমেন্ট শুরু", counts.get("pay_start", 0))}
+      {_card("কনভার্শন (ফ্রি → পেইড)", f"{conversion['rate']:.1f}%")}
     </div>
+    <p class="muted">শেষ {days} দিনে {conversion['came']} জন এসেছে, তার মধ্যে
+       {conversion['paid']} জন কিনেছে — কনভার্শন {conversion['rate']:.1f}%।</p>
+    <h4>🥀 ডেড ফাইল — কেউ দেখেইনি ({len(dead)}টি, শেষ {days} দিন)</h4>
+    <p class="muted">শূন্য ভিউ, শূন্য ডেলিভারি — হয়তো নাম/থাম্বনেইল বদলানো দরকার,
+       নাহয় ফাইলটা বাদ দেওয়া যায়।</p>
+    <table><tr><th>ফাইল</th><th>স্টোর</th><th>ধরন</th><th>যোগ হয়েছে</th><th></th></tr>
+    {dead_rows or "<tr><td colspan=5 class='muted'>বাহ! কোনো ডেড ফাইল নেই</td></tr>"}</table>
     <h4>📈 শেষ {days} দিন</h4>
     <table><tr><th>দিন</th><th>ইউজার</th><th>নতুন</th><th>ডেলিভারি</th><th>পেমেন্ট</th></tr>
     {day_rows or "<tr><td colspan=5 class='muted'>কোনো ডেটা নেই</td></tr>"}</table>
@@ -633,6 +648,42 @@ def logs_body(lines: list[str], level: str = "") -> str:
     </p>
     <div class="card" style="max-height:70vh;overflow:auto;font-family:ui-monospace,monospace;
          font-size:12.5px;line-height:1.5">{joined or '<span class="muted">লগ খালি</span>'}</div>"""
+
+
+def audit_body(name: str = "", days: int = 30) -> str:
+    """🧾 who did what — read straight from the `events` table (see services/audit)."""
+    from app.services import audit
+
+    since = time.time() - max(1, min(days, 365)) * 86400
+    rows = audit.recent(limit=400, since=since, name=name)
+    tally = audit.counts(days=days)
+    chips = "".join(
+        f"<span class='pill'>{esc(audit.label(key))} <b>{count}</b></span>"
+        for key, count in tally[:8])
+    body = "".join(
+        f"<tr><td class='muted'>{fmt_ts(row.get('ts'), '%d %b %H:%M') if row.get('ts') else '—'}</td>"
+        f"<td>{esc(audit.label(row.get('name')))}</td>"
+        f"<td>{esc(str(row.get('user_name') or row.get('user_id') or '—'))}</td>"
+        f"<td>{esc(str(row.get('store_name') or ''))}</td>"
+        f"<td>{esc(str(row.get('ref') or ''))}</td>"
+        f"<td class='muted'>{esc(str(row.get('detail') or '')[:130])}</td></tr>"
+        for row in rows)
+    form = (f"<form class='row' method=get><input name=name value='{esc(name)}' "
+            "placeholder='settings · broadcast · user · store'>"
+            f"<input name=days type=number value='{int(days)}' min=1 max=365 "
+            "style='width:6rem'><button class='ok'>দেখুন</button></form>")
+    return f"""<h3>🧾 অ্যাডমিন অ্যাকশন লগ</h3>
+    <p class="muted">কে কখন কী করল — ব্রডকাস্ট, সেটিং বদল, স্টোর, ব্যান, গ্রান্ট,
+      চ্যানেল তৈরি, স্ক্যান — সব এখানে। ডেটা আসে ডেটাবেসের <code>events</code>
+      টেবিল থেকে, তাই আগের রেকর্ডও হারায় না।</p>
+    {form}
+    <p class="row">{chips or "<span class='muted'>এই সময়ে কোনো অ্যাকশন নেই</span>"}</p>
+    <p class="row"><a class="btn grey" href="/admin/logs">📜 সার্ভার লগ</a>
+      <span class="pill">{len(rows)}টি এন্ট্রি (শেষ {int(days)} দিন)</span></p>
+    <div class="card" style="overflow:auto">
+      <table><tr><th>সময়</th><th>অ্যাকশন</th><th>কে</th><th>স্টোর</th><th>রেফ</th>
+      <th>বিস্তারিত</th></tr>{body or '<tr><td colspan=6 class="muted">কিছু নেই</td></tr>'}</table>
+    </div>"""
 
 
 def files_tools_body() -> str:
