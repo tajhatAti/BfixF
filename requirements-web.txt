@@ -1,0 +1,3 @@
+# Website stack — already part of requirements.txt (the only file hosting
+# panels install), kept for local setups and older instructions.
+-r requirements.txt
