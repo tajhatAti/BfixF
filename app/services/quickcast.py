@@ -242,10 +242,25 @@ def drop_draft(admin_id: int) -> None:
 
 
 # ------------------------------------------------------------------- sending
+def slow_pause(targets: int, minutes: float) -> float:
+    """Seconds between two sends when the owner wants the list spread over N minutes.
+
+    Telegram allows ~30 messages/second in total, and its own advice for very large
+    broadcasts is to spread them out — this turns “৩০ মিনিটে সবাইকে” into the exact
+    per-message pause, capped so a huge audience still finishes in a sane time.
+    """
+    targets = max(1, int(targets))
+    seconds = max(0.0, float(minutes) * 60.0)
+    if not seconds:
+        return 0.0
+    return max(0.05, min(300.0, seconds / targets))
+
+
 async def send_all(admin_id: int, content: Content, *, audience: str | None = None,
                    progress=None, notify_admin: bool = False,
                    test: list[int] | None = None,
-                   scheduled_at: float | None = None) -> dict:
+                   scheduled_at: float | None = None,
+                   slow_minutes: float | None = None) -> dict:
     """Send `content` to an audience through the persistent campaign engine.
 
     * ``test`` — send to these ids only (the admin checks it first, nobody else).
@@ -260,12 +275,14 @@ async def send_all(admin_id: int, content: Content, *, audience: str | None = No
     started = time.time()
     audience = audience or content.audience or "all"
     media = [item.as_dict() for item in content.media]
+    targets = target_count(content, admin_id)
+    pause = slow_pause(targets, slow_minutes) if slow_minutes else 0.0
     campaign = broadcast.create_campaign(
         admin_id, text=content.text, audience=audience, files=[],
         start=False, buttons=content.button_lines(), media=media,
         silent=content.silent, protect=content.protect,
         online_button=content.online_button, origin="br",
-        scheduled_at=scheduled_at,
+        scheduled_at=scheduled_at, pause_seconds=pause,
         title=(content.text or "").strip().splitlines()[0][:40] if content.text else
               f"{len(media)} media item(s)",
     )

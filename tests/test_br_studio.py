@@ -315,3 +315,39 @@ async def test_panel_hint_buttons_open_the_studio_and_the_inbox(studio):
     await call(handler, event, rest)
     assert state.pending_input.get(ADMIN_ID, {}).get("action") == "bc_media", \
         "the inbox capture was not armed"
+
+
+@pytest.mark.asyncio
+async def test_slow_mode_spreads_the_list_over_the_asked_minutes(studio, monkeypatch):
+    """/brslow 30 — Telegram's own advice for big lists, expressed as a real pause."""
+    await call(br_handlers.br_start, BrEvent())
+    await call(br_handlers.br_collect, BrEvent(text="ধীরে যাবে"))
+
+    seen: dict = {}
+
+    async def fake_send_all(admin_id, content, **kwargs):
+        seen.update(kwargs)
+        return {"campaign_id": 1, "sent": 2, "failed": 0, "blocked": 0, "pending": 0,
+                "total": 2, "seconds": 0.1, "status": "done"}
+
+    monkeypatch.setattr(quickcast, "send_all", fake_send_all)
+    event = BrEvent(text="/brslow 30", groups=("slow", None, "30"))
+    await call(br_handlers.br_command, event)
+
+    assert seen.get("slow_minutes") == 30.0
+    assert any("ধীর মোড" in str(text) for text, _buttons in event.sent)
+
+
+@pytest.mark.asyncio
+async def test_slow_mode_needs_a_number(studio):
+    await call(br_handlers.br_start, BrEvent())
+    event = BrEvent(text="/brslow", groups=("slow", None, ""))
+    await call(br_handlers.br_command, event)
+    assert any("কত মিনিট" in str(text) for text, _buttons in event.sent)
+
+
+def test_the_pause_between_sends_is_derived_from_the_window():
+    assert quickcast.slow_pause(600, 10) == pytest.approx(1.0)
+    assert quickcast.slow_pause(100000, 10) == 0.05       # never slower than a floor
+    assert quickcast.slow_pause(2, 60) == 300.0           # and never slower than the cap
+    assert quickcast.slow_pause(0, 0) == 0.0

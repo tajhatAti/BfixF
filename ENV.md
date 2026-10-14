@@ -189,6 +189,8 @@ Public page-এ কোনো management/admin link দেখানো হয় 
 | `BROADCAST_BATCH` | `25` | এক ব্যাচে কতজনকে পাঠাবে (Telegram-এর সীমা ~৩০ মেসেজ/সেকেন্ড) |
 | `BROADCAST_BATCH_PAUSE` | `1.0` | প্রতি ব্যাচের পরে বিরতি (সেকেন্ড) — ফ্লাড লিমিট এড়ায় |
 | `BROADCAST_AUTO_RESUME` | `true` | রিস্টার্টের পর অসমাপ্ত ব্রডকাস্ট নিজে থেকে চালু |
+| `BROADCAST_ADAPTIVE` | `true` | Telegram 429/FloodWait দিলে বাকি ব্রডকাস্ট নিজে থেকেই ধীরে চলে |
+| `AUTO_STORE_PUBLISH_CHANNEL` | `false` | নতুন স্টোর বানালেই আলাদা পাবলিশ চ্যানেল বানায় (ক্যাশ চ্যানেল সবসময় নিজে থেকেই হয়) |
 | `CHANNEL_POST_FOOTER` | — | প্রতিটি চ্যানেল পোস্টের নিচে ফিক্সড লেখা |
 | `DIGEST_ENABLED` | `false` | সাপ্তাহিক নতুন-ভিডিও ডাইজেস্ট চালু |
 | `DIGEST_WEEKDAY` / `DIGEST_HOUR` / `DIGEST_MAX_FILES` | `4` / `10` / `2` | ডাইজেস্টের দিন (০=সোম), সময়, সর্বোচ্চ ভিডিও |

@@ -113,7 +113,8 @@ def create_campaign(admin_id: int, *, text: str = "", title: str = "",
                     link_slug: str = "", caption_position: str = "above",
                     online_button: int | None = None,
                     media: list[dict] | None = None, silent: bool = False,
-                    protect: bool = True, origin: str = "panel") -> dict:
+                    protect: bool = True, origin: str = "panel",
+                    pause_seconds: float = 0.0) -> dict:
     """Build a campaign and (optionally) put it in the queue right away.
 
     `buttons` is the admin's button text (`label | url` per line) — inline URL
@@ -133,6 +134,7 @@ def create_campaign(admin_id: int, *, text: str = "", title: str = "",
         buttons=buttons or "", slug=link_slug or "", media_caption=caption_position or "above",
         online_button=online_button, media=media, silent=1 if silent else 0,
         protect=1 if protect else 0, origin=origin or "panel",
+        pause_seconds=pause_seconds,
     )
     targets = resolve_audience(admin_id, audience or "all")
     db.add_campaign_items(campaign_id, targets)
@@ -529,6 +531,25 @@ async def run_campaign(campaign_id: int, progress: ProgressCb | None = None,
     # instead of crawling through 15-minute waits.
     batch_size = max(1, settings.get_int("BROADCAST_BATCH", SEND_AT_ONCE))
     batch_pause = max(0.0, settings.get_float("BROADCAST_BATCH_PAUSE", 1.0))
+    # Slow mode: a campaign can ask to be spread over a longer window, which is what
+    # Telegram itself recommends for very large broadcasts (30 messages/second is the
+    # hard ceiling; going slower is safer and reaches everybody in one pass).
+    campaign_pause = max(0.0, float(campaign.get("pause_seconds") or 0.0))
+    if campaign_pause:
+        batch_pause = campaign_pause
+        batch_size = 1
+    adaptive = {"extra": 0.0}
+    adaptive_on = settings.get_bool("BROADCAST_ADAPTIVE", True)
+    pause_lock = asyncio.Lock()
+
+    async def _widen(reason: str) -> None:
+        """After a 429/FloodWait, ease off for the rest of this campaign."""
+        if not adaptive_on:
+            return
+        async with pause_lock:
+            adaptive["extra"] = min(10.0, adaptive["extra"] + 0.5)
+            log.info("Campaign #%s: slowing down to +%.1fs per batch (%s)",
+                     campaign_id, adaptive["extra"], reason)
 
     async def _deliver_one(uid: int) -> None:
         try:
@@ -555,6 +576,7 @@ async def run_campaign(campaign_id: int, progress: ProgressCb | None = None,
                 db.mark_campaign_item(campaign_id, uid, "failed", detail)
                 stats["failed"] += 1
                 stats["last_error"] = f"{uid}: {detail}"
+                await _widen("FloodWait")
                 log.warning("Campaign #%s failed for %s: %s", campaign_id, uid, detail)
             except Exception as exc:
                 kind = _classify(exc)
@@ -564,6 +586,8 @@ async def run_campaign(campaign_id: int, progress: ProgressCb | None = None,
                 else:
                     stats["failed"] += 1
                     stats["last_error"] = f"{uid}: {exc}"
+                if "flood" in str(exc).lower() or "429" in str(exc) or "too many requests" in str(exc).lower():
+                    await _widen(str(exc)[:40])
                 detail = str(exc)[:200]
                 db.mark_campaign_item(campaign_id, uid, kind, detail)
                 log.warning("Campaign #%s ? %s for %s: %s", campaign_id, kind, uid, detail)
@@ -580,8 +604,9 @@ async def run_campaign(campaign_id: int, progress: ProgressCb | None = None,
         if batch_size < SEND_AT_ONCE and flights and len(flights) >= batch_size:
             await asyncio.gather(*list(flights), return_exceptions=True)
             flights.clear()
-            if batch_pause:
-                await asyncio.sleep(batch_pause)
+            nap = batch_pause + adaptive["extra"]
+            if nap:
+                await asyncio.sleep(nap)
         await gate.acquire()                          # wait for a free slot, then send
         task = asyncio.ensure_future(_deliver_one(user_id))
         flights.add(task)

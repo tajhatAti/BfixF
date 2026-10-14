@@ -471,6 +471,10 @@ class Database:
             # links each tile to `/inbox/<id>` so the owner can check the actual file.
             ("campaign_media", "item_id",
              "ALTER TABLE campaign_media ADD COLUMN item_id INTEGER DEFAULT 0"),
+            # Slow mode: spread a big list over N minutes instead of one burst
+            # (Telegram allows ~30 messages/second in total).
+            ("campaigns", "pause_seconds",
+             "ALTER TABLE campaigns ADD COLUMN pause_seconds REAL DEFAULT 0"),
         ):
             columns = {row["name"] for row in
                        self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -1955,17 +1959,19 @@ class Database:
                         buttons: str = "", slug: str = "",
                         media_caption: str = "above", online_button: int | None = None,
                         silent: int = 0, protect: int = 1, origin: str = "panel",
-                        media: list[dict] | None = None) -> int:
+                        media: list[dict] | None = None,
+                        pause_seconds: float = 0.0) -> int:
         cur = self._run(
             "INSERT INTO campaigns(admin_id, title, text, files, audience, status,"
             " total, scheduled_at, created_at, buttons, slug, media_caption, online_button,"
-            " silent, protect, origin)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " silent, protect, origin, pause_seconds)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (admin_id, title or "", text or "", json.dumps(files or []),
              audience, status, 0, scheduled_at, time.time(),
              buttons or "", slug or "", media_caption or "above",
              None if online_button is None else (1 if online_button else 0),
-             1 if silent else 0, 1 if protect else 0, origin or "panel"),
+             1 if silent else 0, 1 if protect else 0, origin or "panel",
+             float(pause_seconds or 0.0)),
         )
         campaign_id = int(cur.lastrowid)
         if media:

@@ -322,6 +322,59 @@ async def store_cache_peer(client, store: dict | None):
         return peer_id
 
 
+async def provision_store(store_id: int) -> dict:
+    """Give a brand-new store its own channel(s) without anyone asking.
+
+    The media cache is one private channel **per store** (`store_cache_peer`), so a
+    store's videos never travel through another store's chat. When
+    `AUTO_STORE_PUBLISH_CHANNEL` is on, a public publishing channel is created too —
+    the same one the store page's “📣 পাবলিশ চ্যানেল” button makes by hand.
+
+    Runs in the background after a store is created; every failure is only logged,
+    because a store must never fail to exist because Telegram was busy.
+    """
+    from app.storage import db as _db
+    store = _db.store(int(store_id))
+    if store is None:
+        return {"ok": False, "error": "স্টোর নেই"}
+    client = None
+    try:
+        preferred = int(store.get("admin_id") or 0)
+        client = runtime.user_clients.get(preferred) or next(iter(runtime.user_clients.values()), None)
+    except Exception:
+        client = None
+    if client is None:
+        log.debug("store %s: no user session yet — channels will be created on first use", store_id)
+        return {"ok": False, "error": "সেশন নেই"}
+
+    out: dict = {"ok": True, "cache": None, "publish": None}
+    if not settings.get_str("STORAGE_CHANNEL"):
+        try:
+            out["cache"] = await store_cache_peer(client, store)
+        except Exception as exc:
+            log.warning("store %s: cache channel failed: %s", store_id, exc)
+    if settings.get_bool("AUTO_STORE_PUBLISH_CHANNEL", False) and not store.get("publish_channel_id"):
+        try:
+            from app.services import channels
+            result = await channels.create_store_channel(int(store_id), title=store["name"])
+            out["publish"] = result.get("channel_id")
+            if not result.get("ok"):
+                log.warning("store %s: publish channel failed: %s", store_id,
+                            result.get("error"))
+        except Exception as exc:
+            log.warning("store %s: publish channel failed: %s", store_id, exc)
+    log.info("store %s provisioned: cache=%s publish=%s", store_id, out["cache"], out["publish"])
+    return out
+
+
+def provision_store_later(store_id: int) -> None:
+    """Fire-and-forget version for the store-creation flows."""
+    try:
+        runtime.spawn(provision_store(int(store_id)))
+    except Exception as exc:                       # no event loop (tests) — fine
+        log.debug("could not schedule store provisioning: %s", exc)
+
+
 async def poke_storage_channel(client) -> None:
     """Let the bot (re)learn the cache channel after a restart.
 

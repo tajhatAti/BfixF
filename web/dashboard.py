@@ -49,6 +49,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,     # n
 from app import config as cfg                                                 # noqa: E402
 from app import runtime                                                       # noqa: E402
 from app.logger import log, setup_logging                                     # noqa: E402
+from app.services import quickcast as quickcast_service                          # noqa: E402
 from app.services import (access, basepath, billing, bot_texts, broadcast,    # noqa: E402
                           channels, credentials, feed as feed_service, forcejoin,
                           secrets_guard, settings)
@@ -2014,6 +2015,10 @@ def create_app() -> FastAPI:
             <textarea name=buttons rows=3>{settings.get_str('BROADCAST_DEFAULT_BUTTONS') or "📢 জয়েন | https://t.me/mychannel"}</textarea>
             <div class="chk"><input type=checkbox name=online value=1 checked id=ob>
               <label for=ob>মেসেজের নিচে “🟢 অনলাইন — স্টোর খুলুন” বাটন দিন</label></div>
+            <label>🐢 ধীর মোড — পুরো তালিকা কত মিনিট ধরে পাঠাবে? (০ = স্বাভাবিক গতি)</label>
+            <input name=slow_minutes type=number min=0 max=720 value="0" step="1">
+            <p class="muted">Telegram-এর সীমা ~৩০ মেসেজ/সেকেন্ড; বিশাল তালিকায় ধীর মোড
+            নিরাপদ (৫০০০ জন → ৩০ মিনিট দিলে প্রতি মেসেজ ~০.৩৬ সেকেন্ড পরে যায়)।</p>
             <div class="row">
               <button class="ok" name=action value=start>🚀 তৈরি করে শুরু করুন</button>
               <button class="grey" name=action value=draft>📝 খসড়া রাখুন</button>
@@ -2039,6 +2044,7 @@ def create_app() -> FastAPI:
                             file_id: int = Form(0), text: str = Form(""),
                             action: str = Form("start"), buttons: str = Form(""),
                             online: str = Form(""),
+                            slow_minutes: float = Form(0),
                             media_ids: list[int] = Form(default=[])):
         blocked = _guard(request)
         if blocked:
@@ -2064,10 +2070,14 @@ def create_app() -> FastAPI:
             return RedirectResponse("/admin/broadcast?warn=এই+অডিয়েন্সে+কেউ+নেই", status_code=303)
         owner = cfg.ADMIN_IDS[0] if cfg.ADMIN_IDS else 0
         # Tests and drafts are always non-sendable until an admin explicitly starts them.
+        # Slow mode: spread the audience over N minutes (Telegram's own advice for
+        # big lists — the global ceiling is ~30 messages/second).
+        pause = (quickcast_service.slow_pause(len(targets), slow_minutes)
+                 if slow_minutes and slow_minutes > 0 else 0.0)
         campaign = broadcast.create_campaign(owner, text=body, audience=audience,
                                             files=files, start=(action == "start"),
                                             buttons=buttons, media=media,
-                                            origin="panel",
+                                            origin="panel", pause_seconds=pause,
                                             online_button=1 if online else 0)
         campaign_id = campaign["id"]
         if action == "test":
@@ -2396,6 +2406,8 @@ def create_app() -> FastAPI:
         db.update_store(store["id"], description=(description or "").strip()[:2000],
                         is_premium=1 if str(is_premium) == "1" else 0)
         message = "Store তৈরি হয়েছে।"
+        from app.services import media_cache
+        media_cache.provision_store_later(store["id"])      # per-store channel, in background
         if create_channel:
             result = await channels.create_store_channel(store["id"], title=name)
             if not result.get("ok"):
@@ -2922,7 +2934,7 @@ def create_app() -> FastAPI:
                          f'(<code>t.me/+…</code>) দিন — বট সেটাও বুঝবে।</p>')
             opened = " open" if group.key in ("site", "emergency") else ""
             groups_html.append(f"""
-            <details class="settings-section"{opened}>
+            <details class="settings-section" id="g-{group.key}"{opened}>
               <summary><span>{group.icon} {esc(group.label)}</span>
                 <span class="muted">{len(group.settings)} settings · click to expand</span></summary>
               <div class="card settings-inner">
@@ -2937,6 +2949,11 @@ def create_app() -> FastAPI:
                 </form>
               </div>
             </details>""")
+        # A jump-list, so 12 collapsed groups do not have to be opened one by one.
+        index = "".join(
+            f'<a class="btn grey" href="#g-{group.key}">{group.icon} {esc(group.label)}'
+            f'<span class="muted"> ({len(group.settings)})</span></a>'
+            for group in settings.all_groups())
         body = f"""
         {note}{warnbox}
         <h3>⚙️ সেটিংস</h3>
@@ -2953,6 +2970,7 @@ def create_app() -> FastAPI:
           <a class="btn grey" href="/admin/settings/export">⬇️ config.env হিসেবে এক্সপোর্ট</a>
           <a class="btn grey" href="/admin/download">📥 ডেটা এক্সপোর্ট</a>
         </p>
+        <div class="row" style="margin:0 0 14px">{index}</div>
         {''.join(groups_html)}
         """
         return layout("Settings", body, "/admin/settings")

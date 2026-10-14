@@ -300,3 +300,43 @@ async def test_campaign_sends_in_parallel_so_small_audiences_are_fast(clean, mon
 
     assert result["sent"] == 4 and len(fake.sent) == 4
     assert time.time() - started < 0.6      # one-by-one would take 0.8s+
+
+
+@pytest.mark.asyncio
+async def test_a_slow_campaign_pauses_between_sends(clean, monkeypatch):
+    """`pause_seconds` on the campaign overrides the global batch pause."""
+    _fake_bot(monkeypatch)
+    _store()
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        return None
+
+    monkeypatch.setattr(broadcast.asyncio, "sleep", fake_sleep)
+    campaign = broadcast.create_campaign(ADMIN_ID, text="slowly", audience="all",
+                                         pause_seconds=0.25)
+    result = await broadcast.run_campaign(campaign["id"], notify_admin=False)
+
+    assert result["sent"] == 4
+    assert 0.25 in sleeps, "a slow campaign must actually wait between recipients"
+
+
+@pytest.mark.asyncio
+async def test_a_flood_wait_slows_the_rest_of_the_campaign(clean, monkeypatch):
+    """Adaptive pacing: after Telegram says “too fast”, the campaign eases off."""
+    _fake_bot(monkeypatch, fail_for={13: "Flood wait of 3 seconds"})
+    _store()
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        return None
+
+    monkeypatch.setattr(broadcast.asyncio, "sleep", fake_sleep)
+    campaign = broadcast.create_campaign(ADMIN_ID, text="hi", audience="all",
+                                         pause_seconds=0.1)
+    await broadcast.run_campaign(campaign["id"], notify_admin=False)
+
+    added = [value for value in sleeps if value > 0.1]
+    assert added, "after a FloodWait the pause must grow for the remaining sends"

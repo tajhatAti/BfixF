@@ -171,7 +171,7 @@ async def br_start(event) -> None:
 @bot.on(events.NewMessage(func=_is_admin_private,
                           pattern=r"(?i)^/br(send|test|preview|status|clear|cancel|help|"
                                   r"audience|silent|protect|schedule|queue|who|why|retry|"
-                                  r"cancelqueue)(@\w+)?(\s+[\s\S]*)?$"))
+                                  r"cancelqueue|slow)(@\w+)?(\s+[\s\S]*)?$"))
 async def br_command(event) -> None:
     admin_id = event.sender_id
     command = (event.pattern_match.group(1) or "").lower()
@@ -189,6 +189,7 @@ async def br_command(event) -> None:
             "<code>/braudience all|premium|free|store:12</code> — অডিয়েন্স বদলান\n"
             "<code>/brsilent on|off</code> · <code>/brprotect on|off</code>\n"
             "<code>/brschedule 30</code> — ৩০ মিনিট পরে (মিনিটে)\n"
+            "<code>/brslow 30</code> — পুরো তালিকা ৩০ মিনিট ধরে ধীরে ধীরে (ফ্লাড-নিরাপদ)\n"
             "<code>/brstatus</code> — চলতি/শেষ হওয়া ক্যাম্পেইন\n"
             "<code>/brwho</code> — কারা পাবে (নাম সহ)\n"
             "<code>/brwhy</code> — কারা কেন পায়নি, এক নজরে\n"
@@ -244,6 +245,19 @@ async def br_command(event) -> None:
             await event.respond("কত মিনিট পরে? যেমন: <code>/brschedule 30</code>")
             raise events.StopPropagation
         await _send(event, content, admin_id, when=time.time() + minutes * 60)
+        raise events.StopPropagation
+
+    if command == "slow":
+        minutes = 0.0
+        try:
+            minutes = float(rest.split()[0])
+        except Exception:
+            minutes = 0.0
+        if minutes <= 0:
+            await event.respond("কত মিনিট ধরে পাঠাবে? যেমন: <code>/brslow 30</code>\n"
+                                "(বড় তালিকায় Telegram নিজেই ধীরে পাঠাতে বলে — ~৩০ মেসেজ/সেকেন্ড সীমা)")
+            raise events.StopPropagation
+        await _send(event, content, admin_id, slow_minutes=minutes)
         raise events.StopPropagation
 
     if command == "preview":
@@ -313,7 +327,7 @@ async def br_collect(event) -> None:
 
 # ---------------------------------------------------------------------- send
 async def _send(event, content: Content, admin_id: int, test: bool = False,
-                when: float | None = None) -> None:
+                when: float | None = None, slow_minutes: float | None = None) -> None:
     from app.services.sender import edit_text
 
     if content.is_empty():
@@ -330,6 +344,11 @@ async def _send(event, content: Content, admin_id: int, test: bool = False,
         return
 
     scheduled = bool(when and when > time.time() + 5)
+    if slow_minutes:
+        pause = quickcast.slow_pause(targets, slow_minutes)
+        eta = int(targets * pause / 60) + 1
+        await event.respond(f"🐢 <b>ধীর মোড</b> — {int(slow_minutes)} মিনিটের লক্ষ্য, "
+                            f"প্রতি মেসেজের পরে {pause:.2f} সেকেন্ড (আসলে ~{eta} মিনিট লাগবে)।")
     status = await event.respond(
         (f"🗓 {int((when - time.time()) / 60)} মিনিট পরে পাঠানো হবে…" if scheduled else
          ("🧪 অ্যাডমিনদের কাছে টেস্ট পাঠানো হচ্ছে…" if test else
@@ -352,7 +371,8 @@ async def _send(event, content: Content, admin_id: int, test: bool = False,
 
     result = await quickcast.send_all(
         admin_id, content, audience=content.audience, progress=progress,
-        test=[admin_id] if test else None, scheduled_at=when)
+        test=[admin_id] if test else None, scheduled_at=when,
+        slow_minutes=slow_minutes)
     campaign_id = result.get("campaign_id")
 
     if scheduled:
