@@ -1,0 +1,10 @@
+# ---------------------------------------------------------------------------
+#  Panel installs THIS file (repo mode runs `pip install -r requirements.txt`).
+#  So everything the hosted job needs at runtime belongs here — including the
+#  web stack: main.py/run.py serve the website on $PORT, and without fastapi or
+#  uvicorn the job would start with “no web listener yet”.
+# ---------------------------------------------------------------------------
+telethon>=1.34,<2
+fastapi>=0.110
+uvicorn>=0.27
+python-multipart>=0.0.9      # admin panel form posts (FastAPI Form/UploadFile)
