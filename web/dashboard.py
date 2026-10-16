@@ -1177,7 +1177,8 @@ def setup_page() -> str:
 <div class="wiz">
   <div class="head"><div class="logo">🤖</div>
     <h2>{"বট কানেকশন" if configured else "চলুন বটটা চালু করি"}</h2>
-    <p>{"তথ্য বদলাতে চাইলে নতুন মান দিন — খালি ঘর আগের মতোই থাকবে।" if configured else "৩টা ছোট ধাপ — সব এখানেই, কোনো ফাইল বা ভেরিয়েবল ছুঁতে হবে না।"}</p></div>
+    <p>{"তথ্য বদলাতে চাইলে নতুন মান দিন — খালি ঘর আগের মতোই থাকবে।" if configured else "৩টা ছোট ধাপ — সব এখানেই, কোনো ফাইল বা ভেরিয়েবল ছুঁতে হবে না।"}</p>
+    {('<p class="help">🔒 টোকেন, API ID ও হ্যাশ <b>ডেটাবেজে সেভ করা আছে</b> — একবার দিলে আর কখনো দিতে হবে না, হোস্ট বদলালেও ব্যাকআপের সাথে ফিরে আসে। নতুন বট যোগ করতে <a href="/admin/bots">⚙ বটগুলো</a> দেখুন।</p>' if configured else '')}</div>
   <div class="card">
   <form id="f" autocomplete="off">
     <div class="step"><div class="num">১</div><div class="box">

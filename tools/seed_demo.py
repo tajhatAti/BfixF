@@ -17,6 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app import config as cfg          # noqa: E402
 from app.storage import db             # noqa: E402
 
+ADMIN_ID = 111_000_001
+
 DEMO = {
     "🎬 সিনেমা হাউস": ("premium", [
         ("Interstellar (2014) 1080p", "Video", 2.4 * 1024 ** 3, 4_512),
@@ -128,6 +130,69 @@ def seed_clips(admin_id: int) -> int:
     return made
 
 
+
+def seed_visitors(admin_id: int = 0, days: int = 14) -> int:
+    """Back-dated visitor history, so the 📈 ভিজিটর page has something to show.
+
+    Real visits are recorded by the website itself (`app/services/visitors.py`);
+    this only exists so an owner can *see* the page working before the site has
+    had traffic. Never touches a production database (DB_FILE only).
+    """
+    import time
+
+    pages = ["/", "/stores", "/watch", "/help", "/search?q=কুরিয়ার"]
+    sources = ["সরাসরি", "টেলিগ্রাম", "গুগল", "ফেসবুক", "লিংক থেকে"]
+    devices = [("📱 মোবাইল", "mobile", "Android", "Chrome"),
+               ("💻 ডেস্কটপ", "desktop", "Windows", "Chrome"),
+               ("📱 মোবাইল", "mobile", "iOS", "Safari")]
+    countries = ["BD", "BD", "BD", "IN", "SA", "US"]
+    names = ["রহিম", "করিম", "সাদিয়া", "ইসরাত", "নাবিলা", "তানিম", "ফারহান", "লামিয়া"]
+    store_ids = [s["id"] for s in db.all_stores()] or [0]
+    file_ids = [f["id"] for f in db.recent_public_media(limit=6)] or [0]
+    made = 0
+    for day in range(days - 1, -1, -1):
+        for index in range(random.randint(3, 9)):
+            when = time.time() - day * 86400 - random.randint(0, 20 * 3600)
+            vid = f"demo{day:02d}{index:03d}{random.randint(1000, 9999)}"
+            device, kind, os_name, browser = random.choice(devices)
+            db.visitors.open_visit(
+                vid, user_id=random.choice([0, 0, 0, admin_id]) if admin_id else 0,
+                ip=f"103.{random.randint(1, 250)}.{random.randint(1, 250)}.{random.randint(1, 250)}",
+                country=random.choice(countries), device=device, device_kind=kind,
+                os=os_name, browser=browser, source=random.choice(sources),
+                landing=random.choice(pages), user_agent="seeded")
+            db._run("UPDATE visits SET started_at = ?, last_seen = ? WHERE vid = ?",
+                    (when, when + random.randint(40, 900), vid))
+            for step in range(random.randint(1, 6)):
+                db._run("INSERT INTO page_views(vid, user_id, path, status, ms, is_admin, ts)"
+                        " VALUES(?,?,?,200,?,0,?)",
+                        (vid, 0, random.choice(pages), random.randint(40, 900),
+                         when + step * 45))
+            db._run("UPDATE visits SET pageviews = ? WHERE vid = ?",
+                    (random.randint(1, 6), vid))
+            for event in random.sample(["media_play", "store_open", "media_open", "bot_open",
+                                        "search", "link_open"],
+                                       k=random.randint(1, 3)):
+                db._run("INSERT INTO visit_events(vid, user_id, name, detail, path, store_id,"
+                        " file_id, ts) VALUES(?,?,?,?,?,?,?,?)",
+                        (vid, 0, event, "", random.choice(pages),
+                         random.choice(store_ids), random.choice(file_ids),
+                         when + random.randint(20, 600)))
+            made += 1
+    # a few of them are “online right now”, so the live card is not empty
+    for index in range(random.randint(2, 4)):
+        vid = f"now{index}{random.randint(1000, 9999)}"
+        db.visitors.open_visit(
+            vid, ip=f"103.{random.randint(1, 250)}.{random.randint(1, 250)}.{random.randint(1, 250)}",
+            country=random.choice(countries), device="📱 মোবাইল", device_kind="mobile",
+            os="Android", browser="Chrome", source=random.choice(sources),
+            landing=random.choice(pages), user_agent="seeded")
+        db._run("INSERT INTO visit_events(vid, name, detail, path, file_id, ts)"
+                " VALUES(?,?,?,?,?,?)",
+                (vid, "media_play", "", "/", random.choice(file_ids), time.time()))
+    print(f"  • visitors: {made + 4}টি ডেমো ভিজিট (শেষ {days} দিন)")
+    return made
+
 def main() -> int:
     db.bind(cfg.DB_FILE)
     print(f"Seeding demo data into {cfg.DB_FILE}")
@@ -154,6 +219,7 @@ def main() -> int:
         print(f"  • {name}: {len(db.files_of(store['id']))} files")
 
     seed_clips(admin_id)
+    seed_visitors(admin_id)
 
     # users + a few grants + one pending order
     premium = stores["🎬 সিনেমা হাউস"]
