@@ -237,3 +237,29 @@ def test_a_demo_row_without_its_clip_is_404_not_a_crash(site, tmp_path, monkeypa
     db.update_store(store["id"], is_premium=0)
     file_id = db.add_file(store["id"], "Gone clip", "Video", 0, msg_id=902, size=10)
     assert site.get(f"/media/{file_id}").status_code == 404
+
+
+def test_the_wall_prefers_clips_that_can_play_right_now(tmp_path, monkeypatch):
+    """A cell that 404s is exactly the “autoplay doesn't work” complaint."""
+    from app.services import feed, settings
+    from app.storage import db
+    db.bind(str(tmp_path / "wall.sqlite3"))
+    settings._cache.clear()
+    store = db.create_store(1, "রিল")                 # free store
+    db.update_store(store["id"], is_premium=0)
+    db.add_file(store["id"], "পুরোনো (বটের)", "Video", -100, 90, size=1000)
+    db.add_file(store["id"], "নতুন (বটের)", "Video", -100, 91, size=1000)
+    demo = db.add_file(store["id"], "ডেমো ক্লিপ", "Video", 0, 7, size=1000)
+    media = tmp_path / "demo"
+    media.mkdir()
+    (media / "7.mp4").write_bytes(b"\x00" * 32)
+    monkeypatch.setenv("FEED_DEMO_DIR", str(media))
+    settings.set("FEED_WALL", "2")
+
+    items = feed.wall(limit=2)
+    keys = [item["key"] for item in items]
+    assert f"file:{demo}" in keys                    # the playable one made the wall
+    assert feed.playable_rank({"chat_id": 0, "msg_id": 7}) == 0
+    assert feed.playable_rank({"chat_id": -100, "msg_id": 5}) == 1
+    # a demo row whose clip is missing is not “playable” either
+    assert feed.playable_rank({"chat_id": 0, "msg_id": 999}) == 1

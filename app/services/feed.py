@@ -208,17 +208,34 @@ def gallery(bots: str = "", limit: int | None = None) -> list[dict]:
     return [_decorate(item, bots, index) for index, item in enumerate(items)]
 
 
+def playable_rank(item: dict) -> int:
+    """0 = plays without Telegram, 1 = needs the bot/user session.
+
+    The wall is the feature people look at first, so a clip that is *guaranteed* to
+    play must win a seat over one that may 404 when no session is connected: local
+    demo clips and already-mirrored (cached) files come first.
+    """
+    if is_demo(item):
+        path = demo_path(item)
+        return 0 if path and path.is_file() else 1
+    return 0 if item.get("mirror_msg") else 1
+
+
 def wall(bots: str = "", limit: int | None = None) -> list[dict]:
     """The items of the “several clips at once” wall.
 
     Deliberately the same items as the reel, just as many as FEED_WALL asks for —
     the visitor scrolls into a row of clips that are already playing instead of a
-    black rectangle that never loads.
+    black rectangle that never loads. Among equally new items the ones that can
+    play right now come first (see `playable_rank`); the order inside each group
+    stays newest-first.
     """
     limit = wall_count() if limit is None else max(0, limit)
     if not limit or not enabled():
         return []
-    return latest(bots, limit=limit)
+    pool = latest(bots, limit=max(limit * 3, limit))
+    pool.sort(key=playable_rank)                 # stable → newest first in each group
+    return pool[:limit]
 
 
 def stats() -> dict:
