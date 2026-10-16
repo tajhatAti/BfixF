@@ -3862,22 +3862,131 @@ def create_app() -> FastAPI:
             note = "✅ এই স্টোরের আলাদা চ্যানেল বন্ধ করা হলো"
         return RedirectResponse(f"/admin/stores?flash={note}", status_code=303)
 
-    @app.get("/admin/digest")
-    async def admin_digest_run(request: Request):
-        """🧪 Switch the weekly digest on and send it right now (preview first)."""
+    def _digest_body(flash: str = "", warn: str = "") -> str:
+        """The weekly digest screen: what it is, when it runs, and who got it."""
+        from app.services import scheduler as scheduler_service
+
+        week_ago = time.time() - 7 * 86400
+        ready: list[tuple[str, int, int]] = []
+        for store in db.all_stores():
+            fresh = [f for f in db.files_of(store["id"], newest_first=True)
+                     if (f.get("created_at") or 0) >= week_ago]
+            if fresh:
+                ready.append((store["name"], len(fresh),
+                              len(broadcast.resolve_audience(store["admin_id"],
+                                                             f"store:{store['id']}"))))
+        rows = "".join(
+            f"<tr><td>{esc(name)}</td><td class='num'>{count}</td>"
+            f"<td class='num'>{targets}</td>"
+            f"<td>{status_tag('ready' if targets else 'empty')}</td></tr>"
+            for name, count, targets in ready)
+        table = ui.table(
+            ("স্টোর", "নতুন ফাইল (৭ দিন)", "অডিয়েন্স", "অবস্থা"), rows,
+            numeric=(1, 2),
+            empty_row="গত ৭ দিনে নতুন ফাইল নেই — তাই এই সপ্তাহে ডাইজেস্ট যাবে না।")
+        days = ("সোমবার", "মঙ্গলবার", "বুধবার", "বৃহস্পতিবার", "শুক্রবার",
+                "শনিবার", "রবিবার")
+        weekday = settings.get_int("DIGEST_WEEKDAY", 4)
+        hour = settings.get_int("DIGEST_HOUR", 20)
+        enabled = settings.get_bool("DIGEST_ENABLED", False)
+        max_files = settings.get_int("DIGEST_MAX_FILES", 2)
+        note = ui.note(
+            f"ডাইজেস্ট চালু আছে — প্রতি <b>{days[weekday % 7]}</b> "
+            f"<b>{hour}:00</b>-এ, প্রতি স্টোরের সর্বোচ্চ <b>{max_files}</b>টি নতুন "
+            "ফাইল নিয়ে ক্যাম্পেইন তৈরি হবে।" if enabled else
+            "ডাইজেস্ট এখন <b>বন্ধ</b>। চালু করতে নিচের সেটিংসে টিক দিন।",
+            "ok" if enabled else "warn")
+        recent = [c for c in db.campaigns(limit=40)
+                  if (c.get("title") or "").startswith("সাপ্তাহিক ডাইজেস্ট")][:8]
+        history = ui.timeline([
+            (fmt_ts(c.get("created_at") or 0, "%d %b %H:%M"),
+             f"#{c['id']} — {esc(c.get('title') or '')} "
+             f"<span class='pill'>{esc(c.get('status') or '')}</span>")
+            for c in recent]) if recent else ""
+        return f"""<form method=post action="/admin/digest/save">
+          <div class="card"><h4>⚙️ কখন পাঠাবে</h4>
+            <div class="form-grid">
+              <div><label>অবস্থা</label>
+                <select name=enabled><option value="1"{' selected' if enabled else ''}>
+                  চালু</option><option value="0"{'' if enabled else ' selected'}>বন্ধ</option></select></div>
+              <div><label>দিন</label>
+                <select name=weekday>{''.join(
+                  f'<option value="{i}"{" selected" if i == weekday % 7 else ""}>{d}</option>'
+                  for i, d in enumerate(days))}</select></div>
+              <div><label>সময় (ঘণ্টা)</label>
+                <input name=hour type=number min=0 max=23 value="{hour}"></div>
+              <div><label>সর্বোচ্চ ফাইল</label>
+                <input name=max_files type=number min=1 max=10 value="{max_files}"></div>
+            </div>
+            <div class="row"><button>💾 সেভ করুন</button></div>
+          </div></form>
+          <form method=post action="/admin/digest/run">
+            <div class="card"><h4>🧪 এই সপ্তাহে কী যাবে</h4>
+              {table}
+              <p class="muted">“এখনই পাঠান” চাপলে প্রতি স্টোরের জন্য একটি ক্যাম্পেইন
+              তৈরি হয় — আগে <a href="/admin/broadcast">ব্রডকাস্ট স্টুডিওতে</a> খসড়া
+              হিসেবে দেখে নিতে পারেন, অথবা সরাসরি পাঠাতে পারেন।</p>
+              <div class="row">
+                <button name=action value="draft" class="grey">📝 খসড়া বানান</button>
+                <button name=action value="send">🚀 এখনই পাঠান</button>
+              </div>
+            </div></form>
+          {f'<div class="card"><h4>🕘 আগের ডাইজেস্ট</h4>{history}</div>' if history else ''}
+        """
+
+    @app.get("/admin/digest", response_class=HTMLResponse)
+    async def admin_digest_page(request: Request, flash: str = "", warn: str = ""):
+        """A real page (it used to be a GET that broadcast on click)."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        note = f'<div class="flash">{esc(flash)}</div>' if flash else ""
+        warnbox = f'<div class="warnbox">{esc(warn)}</div>' if warn else ""
+        head = ui.page_head(
+            "সাপ্তাহিক ডাইজেস্ট",
+            "সপ্তাহে একদিন, প্রতি স্টোরের নতুন ফাইল নিয়ে নিজে থেকেই ব্রডকাস্ট — "
+            "কেউ কিছু না করলেও।",
+            eyebrow="AUDIENCE",
+            actions='<a class="btn grey" href="/admin/broadcast">📢 ব্রডকাস্ট</a>')
+        return layout("Weekly digest", head + note + warnbox + _digest_body(),
+                      "/admin/digest")
+
+    @app.post("/admin/digest/save")
+    async def admin_digest_save(request: Request, enabled: str = Form("0"),
+                                weekday: int = Form(4), hour: int = Form(20),
+                                max_files: int = Form(2)):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        settings.set("DIGEST_ENABLED", "1" if enabled in ("1", "on", "true") else "0")
+        settings.set("DIGEST_WEEKDAY", str(max(0, min(6, int(weekday)))))
+        settings.set("DIGEST_HOUR", str(max(0, min(23, int(hour)))))
+        settings.set("DIGEST_MAX_FILES", str(max(1, min(10, int(max_files)))))
+        audit_service.record("settings_saved", ref="digest",
+                             detail=f"enabled={settings.get_bool('DIGEST_ENABLED', False)}")
+        return RedirectResponse("/admin/digest?flash=💾+ডাইজেস্ট+সেটিং+সেভ+হলো",
+                                status_code=303)
+
+    @app.post("/admin/digest/run")
+    async def admin_digest_run(request: Request, action: str = Form("send")):
+        """Send (or draft) this week's digest. Post-only — a link must never do it."""
         blocked = _guard(request)
         if blocked:
             return blocked
         from app.services.scheduler import run_digest
-        result = await run_digest(force=True)
+        if (action or "send").strip().lower() == "draft":
+            result = await run_digest(force=True, start=False)
+        else:
+            result = await run_digest(force=True)
         queued = result.get("queued") or []
         if not queued:
             return RedirectResponse(
-                "/admin/broadcast?warn=এই+সপ্তাহে+নতুন+ফাইল+নেই+(বা+কেউ+নেই)",
+                "/admin/digest?warn=এই+সপ্তাহে+নতুন+ফাইল+নেই+(বা+অডিয়েন্স+খালি)",
                 status_code=303)
         total = sum(item["targets"] for item in queued)
+        verb = "খসড়া+হয়েছে" if (action or "").strip().lower() == "draft" else "কিউ+হয়েছে"
         return RedirectResponse(
-            f"/admin/broadcast?flash=🆕+ডাইজেস্ট+কিউ+হয়েছে:+{len(queued)}+স্টোর,+{total}+ইউজার",
+            f"/admin/digest?flash=🆕+ডাইজেস্ট+{verb}:+{len(queued)}+স্টোর,+{total}+ইউজার",
             status_code=303)
 
     # ==================================================== tools: test / logs (v3)

@@ -322,8 +322,12 @@ async def digest_loop() -> None:
         await asyncio.sleep(600)
 
 
-async def run_digest(force: bool = False) -> dict:
-    """Queue the weekly digest campaigns. Returns a small report."""
+async def run_digest(force: bool = False, *, start: bool = True) -> dict:
+    """Queue the weekly digest campaigns. Returns a small report.
+
+    `start=False` only builds the drafts (the panel's “খসড়া বানান” button), so the
+    owner can look at them in the studio before anything is delivered.
+    """
     from app import runtime
     from app.services import broadcast
 
@@ -344,11 +348,11 @@ async def run_digest(force: bool = False) -> dict:
                 f"{len(fresh)} টি নতুন কনটেন্ট যোগ হয়েছে — নিচের বাটনে চাপ দিন।")
         campaign = broadcast.create_campaign(
             store["admin_id"], title=title, text=text, audience=audience,
-            files=[f["id"] for f in fresh], start=True)
+            files=[f["id"] for f in fresh], start=bool(start))
         queued.append({"store": store["name"], "campaign": campaign["id"],
                        "targets": len(targets), "files": len(fresh)})
         log.info("Digest queued for store %s → %s users", store["id"], len(targets))
-    if queued and runtime.bot_online():
+    if queued and start and runtime.bot_online():
         for item in queued:
             if not broadcast.is_running(item["campaign"]):
                 broadcast.start_campaign(item["campaign"])

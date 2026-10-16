@@ -266,6 +266,19 @@ pre { margin:12px 0; padding:12px 14px; background:var(--surface-3);
 .logline:first-child { color:var(--ink); font-weight:600; }
 .steps { padding-left:20px; }
 .steps li { margin:8px 0; }
+/* The shared base stylesheet (`web.dashboard.CSS`) still paints the old blue/teal
+   gradient on a few elements the setup wizard and old snippets use. Inside the
+   panel everything must be black & white, so they are flattened here. */
+.step .num, .hero, .tick, .spin {
+  background:var(--ink); background-image:none; color:#fff; border-color:var(--ink);
+  box-shadow:none; }
+.hero { color:var(--ink); background:var(--surface); border:1px solid var(--line-2); }
+.hero h2, .hero h1 { color:var(--ink); }
+.hero .muted, .hero p { color:var(--muted); }
+.spin { background:transparent; border-color:var(--line-2); border-top-color:var(--ink); }
+.tick { background:var(--ok-bg); color:var(--ok); }
+.fe { color:var(--bad); }
+.wiz .head .step, .wiz .num { background-image:none; }
 .quick { display:grid; grid-template-columns:repeat(auto-fill,minmax(196px,1fr));
          gap:10px; margin:0 0 18px; }
 .quick a { display:flex; gap:11px; align-items:center; padding:12px 13px;
@@ -502,7 +515,8 @@ STATUS_TAGS: dict[str, tuple] = {
     "done": ("✅ শেষ", "ok"), "sent": ("✅ গেছে", "ok"),
     "cancelled": ("⛔ বাতিল", "plain"), "failed": ("⚠️ ব্যর্থ", "bad"),
     "blocked": ("🚫 ব্লক", "bad"), "pending": ("⏳ অপেক্ষায়", "warn"),
-    "paused": ("⏸ থামানো", "plain"), "open": ("🟡 খোলা", "warn"),
+    "paused": ("⏸ থামানো", "plain"),
+    "ready": ("✅ প্রস্তুত", "ok"), "empty": ("— কিছু নেই", "plain"), "open": ("🟡 খোলা", "warn"),
     "closed": ("✅ বন্ধ", "ok"), "paid": ("💰 পরিশোধিত", "ok"),
     "expired": ("🕓 শেষ", "plain"),
 }

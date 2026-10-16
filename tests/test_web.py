@@ -986,6 +986,27 @@ def test_the_panel_theme_is_monochrome(client):
     # a green for “done”) — the whole layout itself stays black and white.
     for forbidden in ("#245bd6", "#0f766e", "#172033", "tomato"):
         assert forbidden not in css
+    # …and the old blue/teal from the shared base stylesheet is flattened where the
+    # panel reuses those elements (the setup wizard's steps, hero, spinner, tick).
+    for legacy in (".step .num", ".hero", ".spin", ".tick"):
+        assert legacy in css
+
+
+def test_every_admin_page_starts_with_a_heading(client):
+    """Organised panel: each screen opens with breadcrumb + title + explanation."""
+    _store()
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    for path in ("/admin", "/admin/audit", "/admin/analytics", "/admin/stores",
+                 "/admin/files", "/admin/users", "/admin/orders", "/admin/links",
+                 "/admin/settings", "/admin/texts", "/admin/channels",
+                 "/admin/broadcast", "/admin/reel", "/admin/logs", "/admin/self-test",
+                 "/admin/emergency", "/admin/security", "/admin/digest",
+                 "/admin/download", "/admin/session"):
+        page = client.get(path, headers=_auth()).text
+        assert 'class="page-heading"' in page, f"{path} has no page heading"
+        assert 'class="crumbs"' in page, f"{path} has no breadcrumb"
+    # the overview keeps the greeting the dashboard test asserts
+    assert "Welcome back" in client.get("/admin", headers=_auth()).text
 
 
 def test_the_panel_shell_has_the_new_navigation_pieces(client):
@@ -1158,3 +1179,34 @@ def test_campaign_actions_leave_an_audit_trail(client):
     page = client.get("/admin/audit", headers=_auth()).text
     assert "খসড়ার পাবলিক লিংক" in page and "ক্যাম্পেইন মুছে ফেলা" in page
     assert "draft_shared" not in page
+
+
+def test_the_digest_page_is_a_page_not_an_action(client):
+    """The nav link used to fire a broadcast on GET — it must be a screen now."""
+    store = _store("Digest store")
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    page = client.get("/admin/digest", headers=_auth())
+    assert page.status_code == 200
+    assert "সাপ্তাহিক ডাইজেস্ট" in page.text
+    assert 'class="page-heading"' in page.text and 'class="crumbs"' in page.text
+    # form actions are base-relative (they work under a hosted /live/<job>/ prefix)
+    assert "admin/digest/save" in page.text and "admin/digest/run" in page.text
+    assert not db.campaigns(limit=5)                      # opening the page sends nothing
+
+    saved = client.post("/admin/digest/save",
+                        data={"enabled": "1", "weekday": "2", "hour": "9",
+                              "max_files": "3"},
+                        headers=_auth(), follow_redirects=False)
+    assert saved.status_code == 303
+    from app.services import settings
+    assert settings.get_bool("DIGEST_ENABLED", False) is True
+    assert settings.get_int("DIGEST_WEEKDAY", -1) == 2
+    assert settings.get_int("DIGEST_HOUR", -1) == 9
+    assert settings.get_int("DIGEST_MAX_FILES", -1) == 3
+
+    drafted = client.post("/admin/digest/run", data={"action": "draft"},
+                          headers=_auth(), follow_redirects=False)
+    assert drafted.status_code == 303 and "flash=" in drafted.headers["location"]
+    campaigns = db.campaigns(limit=5)
+    assert campaigns and campaigns[0]["title"].startswith("সাপ্তাহিক ডাইজেস্ট")
+    assert campaigns[0]["status"] == "draft"              # nothing was delivered
