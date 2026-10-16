@@ -1253,6 +1253,11 @@ def test_a_restore_from_the_panel_brings_the_data_back(client):
     assert "ইনস্টল ফিরিয়ে আনা হয়েছে" in page                     # the report stays on screen
     assert "সেফটি" in page                                      # safety copy is listed
 
+    from app.services import audit
+    assert "restore_done" in [row["name"] for row in audit.recent(limit=50)]
+    trail = client.get("/admin/audit", headers=_auth()).text
+    assert "ইনস্টল ফিরিয়ে আনা" in trail                         # with a human label
+
 
 def test_a_restore_needs_the_confirmation_box(client):
     _store("Guarded")
