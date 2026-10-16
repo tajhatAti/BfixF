@@ -1,4 +1,6 @@
-"""Emergency switches in the bot: maintenance mode, /maint, /backup, /emergency.
+"""Emergency switches in the bot: maintenance mode, /maint, /emergency.
+
+(`/backup` ও `/restore` — `app/handlers/portable.py`-তে।)
 
 Registered first (see HANDLER_MODULES) so a user turned away by maintenance mode never
 reaches the normal handlers.
@@ -10,7 +12,7 @@ import time
 from telethon import events
 
 from app.runtime import bot
-from app.services import access, backup, maintenance, media_cache, settings
+from app.services import access, maintenance, media_cache, settings
 from app.storage import db
 
 _told: dict[int, float] = {}               # user_id -> when we last answered during maintenance
@@ -130,23 +132,12 @@ async def storageset_command(event) -> None:
     raise events.StopPropagation
 
 
-@bot.on(events.NewMessage(func=_admin_private, pattern=r"(?i)^/backup(?:@\w+)?\s*$"))
-async def backup_command(event) -> None:
-    status = await event.respond("⏳ ব্যাকআপ বানানো হচ্ছে…")
-    try:
-        result = await backup.send_backup("manual", [event.sender_id])
-        await status.edit(f"✅ ব্যাকআপ পাঠানো হয়েছে ({result['size_mb']} MB)" if result["sent"]
-                          else "❌ ব্যাকআপ বানানো গেছে কিন্তু পাঠানো যায়নি।")
-    except Exception as exc:
-        await status.edit(f"❌ ব্যাকআপ ব্যর্থ: {str(exc)[:150]}")
-    raise events.StopPropagation
-
-
 @bot.on(events.NewMessage(func=_admin_private, pattern=r"(?i)^/emergency(?:@\w+)?\s*$"))
 async def emergency_command(event) -> None:
     await event.respond(
         "🚨 <b>জরুরি</b>\n\n"
         "• <code>/maint on</code> / <code>/maint off</code> — ইউজারদের জন্য বট বন্ধ/চালু\n"
-        "• <code>/backup</code> — ডাটাবেস ব্যাকআপ এখনই এখানে পাঠান\n"
+        "• <code>/backup</code> — পুরো ইনস্টলের ব্যাকআপ ফাইল এখনই এখানে পাঠান\n"
+        "• <code>/restore</code> — ব্যাকআপ ফাইল ফিরিয়ে এনে সব ডেটা ফিরিয়ে আনুন\n"
         "• ওয়েবসাইটে <code>/admin/emergency</code> — স্ট্যাটাস, STORAGE_CHANNEL, ভিডিও আবার কপি, force-join বন্ধ করা")
     raise events.StopPropagation

@@ -42,7 +42,7 @@ from urllib.parse import quote_plus
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI, Form, Request                                    # noqa: E402
+from fastapi import FastAPI, File, Form, Request, UploadFile                    # noqa: E402
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,     # noqa: E402
                                RedirectResponse, Response)
 
@@ -52,6 +52,7 @@ from app.logger import log, setup_logging                                     # 
 from app.services import quickcast as quickcast_service                          # noqa: E402
 from app.services import audit as audit_service                                   # noqa: E402
 from web import adminui as ui                                                    # noqa: E402
+from app.services import portable as portable_service                          # noqa: E402
 from app.services import (access, basepath, billing, bot_texts, broadcast,    # noqa: E402
                           channels, credentials, feed as feed_service, forcejoin,
                           secrets_guard, settings)
@@ -354,10 +355,11 @@ ADMIN_NAV = (
     ("📣 অডিয়েন্স", (("/admin/broadcast", "↗", "Broadcasts"), ("/admin/users", "♙", "Users"),
                       ("/admin/orders", "▧", "Orders"), ("/admin/links", "⌁", "Share links"),
                       ("/admin/digest", "◫", "Weekly digest"))),
+    ("💾 ডেটা", (("/admin/backup", "🗄", "Backup & move host"),
+                   ("/admin/download", "⇩", "Exports"))),
     ("📊 হিসাব", (("/admin/analytics", "▥", "Analytics"), ("/admin/self-test", "✓", "System health"),
                    ("/admin/logs", "≡", "Activity logs"),
-                   ("/admin/audit", "🧾", "Admin audit"),
-                   ("/admin/download", "⇩", "Exports"))),
+                   ("/admin/audit", "🧾", "Admin audit"))),
     ("⚙ সেটিংস", (("/setup", "⚙", "Bot connection"), ("/admin/session", "◌", "Telegram session"),
                     ("/admin/settings", "☰", "Preferences"), ("/admin/texts", "✎", "Bot messages"),
                     ("/admin/security", "◇", "Security"))),
@@ -506,6 +508,9 @@ PUBLIC_THEME_CSS = """
 #: Bumped by hand when the panel changes so the owner can see what is deployed.
 PANEL_VERSION = "3.4"
 
+#: The report of the last database restore, so /admin/backup can show what it did.
+_LAST_RESTORE: dict = {}
+
 #: One line under the title of every admin page — what the page is *for*. Empty
 #: values simply print nothing, so a new page can be added before its blurb.
 PAGE_BLURBS: dict[str, str] = {
@@ -526,6 +531,8 @@ PAGE_BLURBS: dict[str, str] = {
     "/admin/digest": "সাপ্তাহিক নতুন-ভিডিও ডাইজেস্ট পাঠানোর নিয়ন্ত্রণ।",
     "/admin/reel": "হোম পেজের অটো-প্লে রিল — কোনটা আগে, কতগুলো, সাউন্ড।",
     "/admin/download": "SQLite/JSON/CSV — ডেটা ব্যাকআপ ও এক্সপোর্ট।",
+    "/admin/backup": "পুরো ইনস্টল এক ফাইলে নামান, আর নতুন হোস্টে ফিরিয়ে আনুন "
+                     "(ইউজার আইডি, অ্যাক্সেস-হ্যাশ, সেটিংস — সবসহ)।",
     "/setup": "BotFather টোকেন, API আইডি/হ্যাশ ও অ্যাডমিন আইডি — একবারই লাগে।",
 }
 
@@ -1092,6 +1099,22 @@ def setup_page() -> str:
       <a class="btn" href="/">🌐 সাইটে যান</a>
       <a class="btn grey" id="tg" style="display:none" target="_blank" rel="noopener">🤖 টেলিগ্রামে বট খুলুন</a></div></div>
   </div>
+  <div class="card" id="restore">
+    <div class="step"><div class="num">🔄</div><div class="box">
+      <h4>হোস্টিং বদলেছেন? আগের ইনস্টল ফিরিয়ে আনুন</h4>
+      <p class="help">আগের জায়গা থেকে নামানো ব্যাকআপ ফাইলটা এখানে দিন — পুরোনো
+      ইউজার, আইডি, স্টোর, ফাইল, সেটিংস আর টোকেন সব ফিরে আসবে। নতুন করে টোকেন দিতে
+      হবে না, উপরের ঘরগুলো খালি রাখলেই চলবে।</p>
+      <form method="post" action="setup/restore" enctype="multipart/form-data">
+        <input type="file" name="file" accept=".gz,.json,.sqlite3,.db,.bfixf,application/gzip">
+        <textarea name="code" rows="2" placeholder="…অথবা ব্যাকআপ কোড পেস্ট করুন (BFIXF1:…)"></textarea>
+        <label class="chk"><input type="checkbox" name="confirm" value="yes">
+          হ্যাঁ, ব্যাকআপটা ফিরিয়ে আনুন</label>
+        <button class="grey" type="submit">♻️ ইনস্টল ফিরিয়ে আনুন</button>
+      </form>
+      <p class="help" id="rn"></p>
+    </div></div>
+  </div>
   {back}
   <p class="muted" style="text-align:center;margin-top:18px">🔒 টোকেন শুধু এই সাইটের ডাটাবেসে থাকে — কোডে বা এনভায়রনমেন্টে নয়, আর এখানে কখনো পুরোটা দেখানো হয় না।</p>
 </div>
@@ -1164,6 +1187,44 @@ def create_app() -> FastAPI:
                 and not path.startswith(("/admin/login", "/admin/logout"))):
             return RedirectResponse("setup", status_code=303)
         return await call_next(request)
+
+    @app.post("/setup/restore")
+    async def setup_restore(request: Request, confirm: str = Form(""),
+                            code: str = Form(""),
+                            file: UploadFile | None = File(None)):
+        """Bring an old install back on a **new host** — before it is configured.
+
+        This is the whole point of the portable backup: on a fresh server the bot is
+        not configured yet, so the panel is not reachable. The restore therefore
+        lives here too. It is only allowed while this install is still unclaimed
+        (once it is configured, /admin/backup — behind the password — does it).
+        """
+        if credentials.is_configured():
+            blocked = _guard(request)
+            if blocked:
+                return blocked
+        if (confirm or "").strip().lower() not in ("yes", "on", "1"):
+            return RedirectResponse("setup?restore=1&warn=Tick+the+box", status_code=303)
+        blob = b""
+        if file is not None and getattr(file, "filename", ""):
+            blob = await file.read()
+        elif (code or "").strip():
+            try:
+                blob = portable_service.decode_text(code)
+            except portable_service.BackupError as exc:
+                return RedirectResponse(f"setup?restore=1&warn={str(exc)[:150]}",
+                                        status_code=303)
+        if not blob:
+            return RedirectResponse("setup?restore=1&warn=No+file+or+code", status_code=303)
+        ok, message = _run_restore(blob, "setup page")
+        if not ok:
+            return RedirectResponse(f"setup?restore=1&warn={message[:150]}", status_code=303)
+        # credentials may have come back with the database → the bot can start now.
+        try:
+            credentials.load()
+        except Exception:
+            log.debug("credential reload after restore failed", exc_info=True)
+        return RedirectResponse("admin", status_code=303)
 
     @app.get("/setup", response_class=HTMLResponse)
     async def setup_view(request: Request):
@@ -3031,6 +3092,203 @@ def create_app() -> FastAPI:
              <a class="btn grey" href="/admin/download/csv/files">🗂 Files CSV</a></p>
         </div>"""
         return layout("Export", body, "/admin/download")
+
+    # ---------------------------------------------------------------- portable
+    # “হোস্টিং বদলালেও কিছু হারাবে না” — one file holds the whole install and can be
+    # given back from the panel, from the setup screen (new host, before anything is
+    # configured) or by sending it to the bot (`/restore`).
+    def _backup_kpis() -> str:
+        counts = db.stats()
+        size = os.path.getsize(str(db.path)) if os.path.exists(str(db.path)) else 0
+        local = portable_service.local_backups(limit=99)
+        return ui.kpi_row(
+            ui.kpi("ডেটাবেজ", human_size(size), sub=esc(os.path.basename(str(db.path)))),
+            ui.kpi("ইউজার", counts.get("users", 0), sub="আইডি + অ্যাক্সেস-হ্যাশ সহ"),
+            ui.kpi("ফাইল", counts.get("files", 0), sub=f"{counts.get('stores', 0)} স্টোরে"),
+            ui.kpi("সেভ করা ব্যাকআপ", len(local), sub="সার্ভারে রাখা ফাইল", dark=True))
+
+    def _backup_local_table() -> str:
+        rows = []
+        for row in portable_service.local_backups(limit=10):
+            pill = ' <span class="pill warn">সেফটি</span>' if row["safety"] else ""
+            rows.append(
+                f"<tr><td><code>{esc(row['name'])}</code>{pill}</td>"
+                f"<td class='num'>{human_size(row['size'])}</td>"
+                f"<td class='muted'>{esc(row['mtime_text'])}</td>"
+                f"<td><form method=post action='/admin/backup/restore-local'>"
+                f"<input type=hidden name=name value='{esc(row['name'])}'>"
+                f"<input type=hidden name=confirm value=yes>"
+                f"<button class='grey'>↩︎ ফিরিয়ে আনুন</button></form></td></tr>")
+        return ui.table(("ফাইল", "সাইজ", "কখন", ""), "".join(rows), numeric=(1,),
+                        empty_row="এখনো কোনো ব্যাকআপ ফাইল সেভ করা হয়নি।")
+
+    def _restore_card() -> str:
+        """What the last restore did — kept on screen until the next one."""
+        report = _LAST_RESTORE.get("report")
+        if not report:
+            return ""
+        after = report.get("counts_after") or {}
+        before = report.get("counts_before") or {}
+        pairs = "".join(
+            f"<li>{label}: {before.get(key, 0)} → <b>{after.get(key, 0)}</b></li>"
+            for key, label in (("users", "ইউজার"), ("stores", "স্টোর"),
+                               ("files", "ফাইল"), ("grants", "অ্যাক্সেস"),
+                               ("orders", "অর্ডার")))
+        creds = ("এই ব্যাকআপে বট টোকেন/API আইডিও ছিল — সেটাও ফিরে এসেছে, নতুন হোস্টে "
+                 "আলাদা করে কিছু দিতে হবে না।" if report.get("credentials_included") else
+                 "ব্যাকআপে টোকেন ছিল না — <code>/setup</code>-এ একবার টোকেন/API আইডি দিন।")
+        return (f"<div class='note ok'><b>✅ ইনস্টল ফিরিয়ে আনা হয়েছে</b> "
+                f"({esc(report.get('created_at_text') or '')} · {esc(report.get('source') or '')})"
+                f"<ul>{pairs}</ul><p>{creds}</p>"
+                f"<p class='muted'>রিস্টোরের আগের অবস্থা সেভ করা আছে: "
+                f"<code>{esc(os.path.basename(report.get('safety_copy') or '—'))}</code> — "
+                f"ভুল হয়ে গেলে ওটা দিয়েই ফেরা যায়।</p></div>")
+
+    def _run_restore(blob: bytes, source: str) -> tuple[bool, str]:
+        """Restore and remember the report. Returns (ok, message-for-the-user)."""
+        try:
+            report = portable_service.restore(blob, source=source)
+        except portable_service.BackupError as exc:
+            return False, str(exc)
+        except Exception as exc:                              # pragma: no cover - defensive
+            log.exception("restore failed")
+            return False, f"রিস্টোর ব্যর্থ: {exc}"
+        _LAST_RESTORE["report"] = report
+        audit_service.record("restore_done", ref=source,
+                             detail=str(report.get("counts_after", {}))[:250])
+        after = report.get("counts_after") or {}
+        return True, (f"✅ ইনস্টল ফিরিয়ে আনা হয়েছে — {after.get('users', 0)} ইউজার, "
+                      f"{after.get('stores', 0)} স্টোর, {after.get('files', 0)} ফাইল")
+
+    def _restore_forms(action: str, *, heading: str, hint: str) -> str:
+        return f"""<div class="card"><h4>{heading}</h4>
+          <p class="muted">{hint}</p>
+          <form method=post action="{action}" enctype="multipart/form-data">
+            <label>ব্যাকআপ ফাইল (.bfixf.gz / .sqlite3 / .json)</label>
+            <input type="file" name="file"
+                   accept=".gz,.json,.sqlite3,.db,.bfixf,application/gzip">
+            <label>…অথবা ব্যাকআপ কোড পেস্ট করুন (BFIXF1:…)</label>
+            <textarea name="code" rows=3
+              placeholder="BFIXF1:1/5:H4sIA… (কয়েক টুকরো হলে সবগুলো একসাথে পেস্ট করুন)"></textarea>
+            <label class="chk"><input type="checkbox" name="confirm" value="yes">
+              আমি বুঝেছি — এখনকার ডেটা এই ব্যাকআপ দিয়ে বদলে যাবে (আগেরটার সেফটি কপি
+              নিজে থেকেই সেভ হবে)</label>
+            <button>♻️ ফিরিয়ে আনুন</button>
+          </form></div>"""
+
+    @app.get("/admin/backup", response_class=HTMLResponse)
+    async def admin_backup(request: Request, flash: str = "", warn: str = ""):
+        """Download / upload / paste — the whole “move to another host” job in one page."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        note = f'<div class="flash">{esc(flash)}</div>' if flash else ""
+        warnbox = f'<div class="warnbox">{esc(warn)}</div>' if warn else ""
+        steps = "".join(f"<li>{step}</li>" for step in portable_service.migration_steps())
+        codes = portable_service.text_codes()
+        code_hint = (f"পুরো ইনস্টল {len(codes)} টুকরো টেক্সট কোডেও নেওয়া যায় — খুব দরকার "
+                     f"হলে ডাউনলোড না করে কোড কপি করুন।" if len(codes) > 1 else
+                     "ছোট ইনস্টল হলে এক লাইন টেক্সট কোডেও নেওয়া যায়।")
+        body = f"""
+        {ui.page_head("ব্যাকআপ ও হোস্টিং বদল",
+                      "একটা ফাইলেই পুরো ইনস্টল — ইউজার আইডি, অ্যাক্সেস-হ্যাশ, স্টোর, "
+                      "ফাইল, সেটিংস, টেক্সট, অর্ডার, কুপন। নতুন হোস্টে সেটা ফিরিয়ে "
+                      "দিলে সব আগের মতোই হয়ে যায়।",
+                      eyebrow="SETTINGS",
+                      actions=('<a class="btn grey" href="/admin/download">📥 অন্যান্য এক্সপোর্ট</a>'
+                               '<a class="btn grey" href="/admin/self-test">🩺 সেলফ-টেস্ট</a>'))}
+        {note}{warnbox}{_restore_card()}{_backup_kpis()}
+        <div class="grid two">
+          <div class="card"><h4>⬇️ ১. এখনকার ইনস্টল নামান</h4>
+            <p class="muted">ডেটাবেজ gzip হয়ে ছোট থাকে; বট টোকেন (ওয়েবসাইট থেকে দিলে)
+            ফাইলের ভিতরেই যায়।</p>
+            <div class="row">
+              <a class="btn" href="/admin/backup/download">🗄 পুরো ব্যাকআপ নামান</a>
+              <form method=post action="/admin/backup/save">
+                <button class="grey">💾 সার্ভারেও সেভ করুন</button></form>
+            </div>
+            <p class="muted">⚠️ ফাইল/কোডে টোকেন থাকতে পারে — শুধু নিজের কাছে রাখুন।<br>
+            {code_hint}</p>
+          </div>
+          {_restore_forms("/admin/backup/restore", heading="⬆️ ২. অন্য জায়গার ইনস্টল ফিরিয়ে আনুন",
+                          hint="এই হোস্টের সব ডেটা ব্যাকআপের ডেটাতে বদলে যাবে — তাই আগের "
+                               "অবস্থা নিজে থেকেই সেভ করা হয়।")}
+        </div>
+        <div class="card"><h4>🗂 সার্ভারে সেভ করা ব্যাকআপ</h4>{_backup_local_table()}</div>
+        <div class="card"><h4>🚚 নতুন হোস্টে নেওয়ার ধাপ</h4><ol class="steps">{steps}</ol></div>
+        """
+        return layout("Backup", body, "/admin/backup")
+
+    @app.get("/admin/backup/download")
+    async def admin_backup_download(request: Request):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        data = portable_service.export_bytes(note="panel download")
+        audit_service.record("backup_downloaded", ref="panel", detail=f"{len(data)} bytes")
+        headers = {"Content-Disposition":
+                   f'attachment; filename="{portable_service.filename()}"'}
+        return Response(content=data, media_type="application/gzip", headers=headers)
+
+    @app.post("/admin/backup/save")
+    async def admin_backup_save(request: Request):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        directory = str(cfg.BACKUP_DIR)
+        os.makedirs(directory, exist_ok=True)
+        name = portable_service.filename()
+        with open(os.path.join(directory, name), "wb") as handle:
+            handle.write(portable_service.export_bytes(note="saved from panel"))
+        audit_service.record("backup_saved", ref="panel", detail=name)
+        return RedirectResponse(f"/admin/backup?flash=💾 ব্যাকআপ সেভ হলো: {name}",
+                                status_code=303)
+
+    @app.post("/admin/backup/restore")
+    async def admin_backup_restore(request: Request, confirm: str = Form(""),
+                                   code: str = Form(""),
+                                   file: UploadFile | None = File(None)):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        if (confirm or "").strip().lower() not in ("yes", "on", "1"):
+            return RedirectResponse(
+                "/admin/backup?warn=নিশ্চিত করার বক্সে টিক দিন (ডেটা বদলে যাবে)",
+                status_code=303)
+        blob = b""
+        if file is not None and getattr(file, "filename", ""):
+            blob = await file.read()
+        elif (code or "").strip():
+            try:
+                blob = portable_service.decode_text(code)
+            except portable_service.BackupError as exc:
+                return RedirectResponse(f"/admin/backup?warn={str(exc)[:160]}",
+                                        status_code=303)
+        if not blob:
+            return RedirectResponse("/admin/backup?warn=ফাইল বা ব্যাকআপ কোড কিছুই দিননি",
+                                    status_code=303)
+        ok, message = _run_restore(blob, "panel upload")
+        key = "flash" if ok else "warn"
+        return RedirectResponse(f"/admin/backup?{key}={message}", status_code=303)
+
+    @app.post("/admin/backup/restore-local")
+    async def admin_backup_restore_local(request: Request, name: str = Form(""),
+                                         confirm: str = Form("")):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        if (confirm or "").strip().lower() not in ("yes", "on", "1"):
+            return RedirectResponse("/admin/backup?warn=নিশ্চিত করার টিক দিন",
+                                    status_code=303)
+        safe = os.path.basename(name or "")
+        path = os.path.join(str(cfg.BACKUP_DIR), safe)
+        if not safe.endswith(portable_service.SUFFIX) or not os.path.isfile(path):
+            return RedirectResponse("/admin/backup?warn=ফাইলটা সার্ভারে নেই",
+                                    status_code=303)
+        with open(path, "rb") as handle:
+            ok, message = _run_restore(handle.read(), f"local {safe}")
+        key = "flash" if ok else "warn"
+        return RedirectResponse(f"/admin/backup?{key}={message}", status_code=303)
 
     @app.get("/admin/download/db")
     async def download_db(request: Request):

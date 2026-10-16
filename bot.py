@@ -142,7 +142,8 @@ def main() -> int:
     # Handlers register themselves on import (they need runtime.bot to exist),
     # so we import every handler module for its side effects.
     from importlib import import_module
-    for module_name in ("app.handlers.guard", "app.handlers.br", "app.handlers.admin",
+    for module_name in ("app.handlers.guard", "app.handlers.portable", "app.handlers.br",
+                        "app.handlers.admin",
                         "app.handlers.billing",
                         "app.handlers.extras", "app.handlers.inline", "app.handlers.linkpanel",
                         "app.handlers.manage", "app.handlers.messages", "app.handlers.panel_v3",
