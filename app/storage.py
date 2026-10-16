@@ -404,6 +404,25 @@ CREATE TABLE IF NOT EXISTS bc_media (
     used     INTEGER DEFAULT 0
 );
 
+-- ==================== extra bots (several bots, one database) =================
+-- A second/third bot token cannot be polled from the same process, so each row
+-- here is run by its own small `bot.py` process against this same database.
+CREATE TABLE IF NOT EXISTS bots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    label       TEXT DEFAULT '',
+    username    TEXT DEFAULT '',
+    token       TEXT NOT NULL,
+    api_id      INTEGER DEFAULT 0,
+    api_hash    TEXT DEFAULT '',
+    admin_id    INTEGER DEFAULT 0,
+    note        TEXT DEFAULT '',
+    enabled     INTEGER DEFAULT 1,
+    created_at  REAL,
+    last_start  REAL DEFAULT 0,
+    last_error  TEXT DEFAULT '',
+    origin      TEXT DEFAULT 'panel'
+);
+
 -- ==================== visitor analytics (who is on the site right now) ========
 -- One row per *visit* (a person + a session, closed after 30 quiet minutes), so
 -- “কতজন এখন অনলাইনে / কোথা থেকে এসেছে” needs no external service at all.
@@ -2868,3 +2887,44 @@ class _VisitorStore:
 
 
 Database.visitors = property(lambda self: _VisitorStore(self))          # type: ignore[attr-defined]
+
+class _BotStore:
+    """Extra bots: add, list, edit, remove (each one runs in its own process)."""
+
+    def __init__(self, database: "Database") -> None:
+        self._db = database
+
+    def add_bot(self, token: str, *, label: str = "", admin_id: int = 0, api_id: int = 0,
+                api_hash: str = "", note: str = "", enabled: int = 1,
+                origin: str = "panel") -> int:
+        cursor = self._db._run(
+            "INSERT INTO bots(label, token, admin_id, api_id, api_hash, note, enabled,"
+            " created_at, origin) VALUES(?,?,?,?,?,?,?,?,?)",
+            (str(label or ""), str(token or ""), int(admin_id or 0), int(api_id or 0),
+             str(api_hash or ""), str(note or ""), int(enabled or 0), time.time(),
+             str(origin or "panel")))
+        return int(cursor.lastrowid or 0)
+
+    def bots(self) -> list[dict]:
+        return [dict(row) for row in self._db._q("SELECT * FROM bots ORDER BY id")]
+
+    def bot(self, bot_id: int) -> dict | None:
+        return self._db._dict(self._db._one("SELECT * FROM bots WHERE id = ?", (int(bot_id),)))
+
+    def bot_by_token(self, token: str) -> dict | None:
+        return self._db._dict(self._db._one("SELECT * FROM bots WHERE token = ?", (str(token),)))
+
+    def update_bot(self, bot_id: int, **fields) -> None:
+        allowed = {"label", "username", "token", "api_id", "api_hash", "admin_id", "note",
+                   "enabled", "last_start", "last_error", "origin"}
+        pairs = [(key, value) for key, value in fields.items() if key in allowed]
+        if not pairs:
+            return
+        sql = "UPDATE bots SET " + ", ".join(f"{key} = ?" for key, _ in pairs) + " WHERE id = ?"
+        self._db._run(sql, tuple(value for _, value in pairs) + (int(bot_id),))
+
+    def delete_bot(self, bot_id: int) -> None:
+        self._db._run("DELETE FROM bots WHERE id = ?", (int(bot_id),))
+
+
+Database.bots_store = property(lambda self: _BotStore(self))            # type: ignore[attr-defined]

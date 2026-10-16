@@ -362,7 +362,8 @@ ADMIN_NAV = (
                    ("/admin/self-test", "✓", "System health"),
                    ("/admin/logs", "≡", "Activity logs"),
                    ("/admin/audit", "🧾", "Admin audit"))),
-    ("⚙ সেটিংস", (("/setup", "⚙", "Bot connection"), ("/admin/session", "◌", "Telegram session"),
+    ("⚙ সেটিংস", (("/setup", "⚙", "Bot connection"), ("/admin/bots", "🤖", "Bots"),
+                    ("/admin/admins", "👥", "Admins"), ("/admin/session", "◌", "Telegram session"),
                     ("/admin/settings", "☰", "Preferences"), ("/admin/texts", "✎", "Bot messages"),
                     ("/admin/security", "◇", "Security"))),
 )
@@ -525,6 +526,10 @@ PAGE_BLURBS: dict[str, str] = {
     "/admin/analytics": "ফানেল, ডেড ফাইল, কনভার্শন — সংখ্যায় কনটেন্টের অবস্থা।",
     "/admin/visitors": ("লাইভ ভিজিটর — এখন কে সাইটে, কোথা থেকে এসেছে, কোন পেজ দেখছে, "
                         "কোন ভিডিও চালাচ্ছে, কে বট থেকে আর কে লিংক থেকে।"),
+    "/admin/bots": ("একই ডেটাবেজে একাধিক বট — একটা বন্ধ হলে অন্যটা চলবে; BotFather-এর "
+                    "টোকেন পেস্ট বা ফরওয়ার্ড করলেই নতুন বট চালু।"),
+    "/admin/admins": ("কে এই প্যানেল ও বট চালাতে পারবে — আইডি দিয়ে যোগ/সরান, যোগ হলে "
+                      "স্বাগতম মেসেজও যায়।"),
     "/admin/settings": "বট, সাইট, পেমেন্ট, ব্রডকাস্ট — সব সেটিং এক জায়গায়, রিস্টার্ট ছাড়াই।",
     "/admin/texts": "বটের প্রতিটি মেসেজের ভাষা নিজে লিখুন (বাংলা/English)।",
     "/admin/channels": "যেসব চ্যানেল বট ব্যবহার করে — ফোর্স-জয়েন গেট আর প্রতি স্টোরের ক্যাশ।",
@@ -4621,6 +4626,127 @@ def create_app() -> FastAPI:
         checks = await panels.self_test()
         note = f'<div class="flash">{esc(flash)}</div>' if flash else ""
         return layout("Self test", note + panels.self_test_body(checks), "/admin/self-test")
+
+    # ------------------------------------------------------------ extra bots
+    @app.get("/admin/bots", response_class=HTMLResponse)
+    async def admin_bots(request: Request, flash: str = "", warn: str = ""):
+        """🤖 Several bots, one database — add, start, stop, drop."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        return layout("Bots", panels.bots_body(flash=flash, warn=warn), "/admin/bots")
+
+    @app.post("/admin/bots/add")
+    async def admin_bots_add(request: Request, token: str = Form(""), label: str = Form(""),
+                             admin_id: str = Form(""), api_id: str = Form(""),
+                             note: str = Form("")):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        from app.services import botrunner
+        try:
+            report = botrunner.add(
+                token, label=label.strip(), note=note.strip(),
+                admin_id=int(admin_id) if admin_id.strip().isdigit() else 0,
+                api_id=int(api_id) if api_id.strip().isdigit() else 0)
+        except Exception as exc:                       # never a 500 in the panel
+            log.warning("adding a bot failed: %s", exc)
+            return RedirectResponse(f"/admin/bots?warn=বট যোগ করা যায়নি: {str(exc)[:120]}",
+                                    status_code=303)
+        if not report.get("ok"):
+            return RedirectResponse(f"/admin/bots?warn={report['error'][:160]}", status_code=303)
+        row = db.bots_store.bot(int(report["id"]))
+        started = botrunner.start(row) if row else {"ok": False}
+        audit_service.record("bot_added", ref=str(report["id"]),
+                             detail=(label or "")[:80])
+        if started.get("ok"):
+            return RedirectResponse(
+                f"/admin/bots?flash=✅ বট #{report['id']} যোগ হয়ে চালু হয়েছে "
+                f"(pid {started.get('pid')})", status_code=303)
+        return RedirectResponse(
+            f"/admin/bots?warn=বট যোগ হয়েছে কিন্তু চালু হয়নি: "
+            f"{(started.get('error') or '')[:120]}", status_code=303)
+
+    @app.get("/admin/bots/{bot_id}/{action}")
+    async def admin_bots_action(request: Request, bot_id: int, action: str):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        from app.services import botrunner
+        row = db.bots_store.bot(bot_id)
+        if row is None:
+            return RedirectResponse("/admin/bots?warn=বটটা খুঁজে পাওয়া যায়নি", status_code=303)
+        if action == "start":
+            report = botrunner.start(row)
+        elif action == "stop":
+            report = botrunner.stop(row)
+        elif action == "restart":
+            report = botrunner.restart(row)
+        elif action == "delete":
+            botrunner.stop(row)
+            db.bots_store.delete_bot(bot_id)
+            audit_service.record("bot_removed", ref=str(bot_id), detail=action)
+            return RedirectResponse(
+                f"/admin/bots?flash=🗑 বট #{bot_id} বাদ দেওয়া হয়েছে "
+                "(BotFather-এ /revoke দিয়ে টোকেনটা বাতিল করে দিন)", status_code=303)
+        else:
+            return RedirectResponse("/admin/bots?warn=চেনা যায়নি", status_code=303)
+        if action != "stop":
+            audit_service.record(f"bot_{action}", ref=str(bot_id))
+        if report.get("ok"):
+            return RedirectResponse(f"/admin/bots?flash=✅ {action} ঠিক হয়েছে", status_code=303)
+        return RedirectResponse(f"/admin/bots?warn={(report.get('error') or '')[:140]}",
+                                status_code=303)
+
+    # ---------------------------------------------------------------- admins
+    @app.get("/admin/admins", response_class=HTMLResponse)
+    async def admin_admins(request: Request, flash: str = "", warn: str = ""):
+        """👥 Who may run this panel and the bot — add or remove admins."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        return layout("Admins", panels.admins_body(flash=flash, warn=warn), "/admin/admins")
+
+    @app.post("/admin/admins/add")
+    async def admin_admins_add(request: Request, user_id: str = Form("")):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        if not user_id.strip().isdigit():
+            return RedirectResponse("/admin/admins?warn=টেলিগ্রাম আইডি শুধু সংখ্যা হবে",
+                                    status_code=303)
+        added = credentials.add_admin(int(user_id.strip()))
+        audit_service.record("admin_added", ref=user_id.strip())
+        if not added:
+            return RedirectResponse("/admin/admins?warn=ইনি তো আগেই অ্যাডমিন", status_code=303)
+        # A friendly hello, so the new admin knows what just happened.
+        from app.runtime import bot
+        try:
+            await bot.send_message(
+                int(user_id.strip()),
+                "👋 <b>আপনাকে অ্যাডমিন করা হয়েছে</b>\n"
+                "এখন থেকে আপনি এই বটের সব কিছু চালাতে পারবেন — স্টোর, ব্রডকাস্ট, ব্যাকআপ।\n"
+                "শুরু করতে বটে <code>/start</code> দিন।")
+        except Exception as exc:
+            log.debug("welcome message to the new admin failed: %s", exc)
+            return RedirectResponse(
+                "/admin/admins?flash=✅ যোগ হয়েছে (স্বাগতম মেসেজটা যায়নি — উনি বটে /start "
+                "দিলে পাবেন)", status_code=303)
+        return RedirectResponse(f"/admin/admins?flash=✅ {user_id} এখন অ্যাডমিন — স্বাগতম "
+                                "মেসেজ পাঠানো হয়েছে", status_code=303)
+
+    @app.get("/admin/admins/remove/{user_id}")
+    async def admin_admins_remove(request: Request, user_id: int):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        removed = credentials.remove_admin(user_id)
+        if not removed:
+            return RedirectResponse("/admin/admins?warn=মূল অ্যাডমিনকে সরানো যায় না",
+                                    status_code=303)
+        audit_service.record("admin_removed", ref=str(user_id))
+        return RedirectResponse(f"/admin/admins?flash=🗑 {user_id} কে সরানো হয়েছে",
+                                status_code=303)
 
     # -------------------------------------------------------------- visitors
     @app.get("/admin/visitors", response_class=HTMLResponse)

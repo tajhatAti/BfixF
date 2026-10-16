@@ -102,6 +102,60 @@ def is_configured() -> bool:
                 and TOKEN_RE.match(cfg.BOT_TOKEN))
 
 
+def admins() -> list[int]:
+    """Every Telegram id that may use the panel and the bot's admin commands."""
+    saved = parse_admin_ids(db.get_meta(K_ADMINS, ""))
+    return saved or list(cfg.ADMIN_IDS)
+
+
+def admin_details() -> list[dict]:
+    """The admin list with names, so the panel shows people, not numbers."""
+    out = []
+    known = {row["user_id"]: row for row in db.all_users_brief()}
+    for index, user_id in enumerate(admins()):
+        row = known.get(user_id) or {}
+        out.append({"user_id": user_id, "name": row.get("name") or "",
+                    "username": row.get("username") or "",
+                    "owner": index == 0,
+                    "has_session": db.session(user_id) is not None,
+                    "seen": row.get("last_seen") or 0})
+    return out
+
+
+def save_admins(ids: list[int]) -> list[int]:
+    """Store the whole admin list (the first one is the *owner*)."""
+    clean: list[int] = []
+    for value in ids:
+        try:
+            user_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if user_id > 0 and user_id not in clean:
+            clean.append(user_id)
+    if not clean:
+        return admins()
+    db.set_meta(K_ADMINS, ",".join(str(user_id) for user_id in clean))
+    cfg.ADMIN_IDS[:] = clean            # in place — modules hold this very list
+    return clean
+
+
+def add_admin(user_id: int) -> bool:
+    ids = admins()
+    if int(user_id) in ids:
+        return False
+    save_admins(ids + [int(user_id)])
+    return True
+
+
+def remove_admin(user_id: int) -> bool:
+    """Remove somebody — the very first admin (the owner) can never be removed."""
+    ids = admins()
+    if len(ids) <= 1 or int(user_id) not in ids or ids[0] == int(user_id):
+        return False
+    save_admins([value for value in ids if value != int(user_id)])
+    return True
+
+
 def masked_token() -> str:
     token = cfg.BOT_TOKEN or ""
     return f"{token.split(':')[0]}:••••••••{token[-4:]}" if ":" in token else ""

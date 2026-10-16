@@ -962,3 +962,108 @@ def visitors_body(days: int = 14, tab: str = "live") -> str:
         <button class="btn grey">🧹 ছোট করে ফেলুন</button>
       </form>
     </div>"""
+
+
+# ---------------------------------------------------------------------- bots
+def bots_body(flash: str = "", warn: str = "") -> str:
+    """🤖 বটগুলো — several bots on one database, each in its own process."""
+    from app.services import botrunner
+    rows = botrunner.status()
+    table_rows = []
+    for row in rows:
+        bot_id = row.get("id") or 0
+        state = ("🟢 চলছে" if row.get("running") else "⚪️ বন্ধ") if not row.get("main") else "🟢 চলছে (মূল)"
+        controls = ""
+        if not row.get("main"):
+            controls = (
+                (f"<a class='btn grey' href='/admin/bots/{bot_id}/stop'>⏹ বন্ধ</a> "
+                 if row.get("running") else
+                 f"<a class='btn' href='/admin/bots/{bot_id}/start'>▶️ চালু</a> ")
+                + f"<a class='btn grey' href='/admin/bots/{bot_id}/restart'>🔄</a> "
+                  f"<a class='btn bad' href='/admin/bots/{bot_id}/delete'>🗑</a>")
+        table_rows.append([
+            f"{esc(row.get('label') or f'বট #{bot_id}')}"
+            + (f"<div class='muted'>@{esc(row.get('username') or '')}</div>"
+               if row.get("username") else ""),
+            state,
+            f"<code>{esc(row.get('masked') or botrunner.mask_token(row.get('token') or ''))}</code>",
+            f"<code>{row.get('admin_id') or '—'}</code>",
+            esc(str(row.get("last_error") or "")[:60]) or "—",
+            controls,
+        ])
+    table = ui.table(["বট", "অবস্থা", "টোকেন", "অ্যাডমিন", "সর্বশেষ সমস্যা", ""], table_rows,
+                     empty_row="এখনো কোনো বট যোগ করা হয়নি")
+    note = f'<div class="flash">{esc(flash)}</div>' if flash else ""
+    warnbox = f'<div class="warnbox">{esc(warn)}</div>' if warn else ""
+    return f"""{note}{warnbox}
+    <div class="card">
+      <h3>➕ নতুন বট যোগ করুন</h3>
+      <p class="muted">@BotFather-এ <code>/newbot</code> দিয়ে টোকেন নিন। টোকেনটা এখানে পেস্ট
+        করুন — অথবা <b>BotFather-এর মেসেজটা যেকোনো চালু বটে ফরওয়ার্ড করুন</b>, তখন কিছু লিখতেই
+        হবে না। নতুন বট একই ডেটাবেজ ব্যবহার করবে (একই ইউজার, স্টোর, অর্ডার), আর একটি বন্ধ হলেও
+        বাকিগুলো চলতেই থাকবে।</p>
+      <form method=post action="/admin/bots/add">
+        <label>বট টোকেন</label>
+        <input name="token" placeholder="1234567890:AAH…" required>
+        <label>নাম (ঐচ্ছিক)</label>
+        <input name="label" placeholder="যেমন: দ্বিতীয় বট">
+        <label>এই বটের অ্যাডমিন আইডি (ঐচ্ছিক — খালি রাখলে মূল অ্যাডমিন)</label>
+        <input name="admin_id" placeholder="123456789">
+        <label>API ID (ঐচ্ছিক — খালি রাখলে এখনকারটাই ব্যবহার হবে)</label>
+        <input name="api_id" placeholder="123456">
+        <label>টীকা (ঐচ্ছিক)</label>
+        <input name="note" placeholder="যেমন: ব্যাকআপ বট">
+        <button class="btn">➕ যোগ করুন</button>
+      </form>
+    </div>
+    <div class="card"><h3>🤖 সব বট</h3>{table}</div>
+    <div class="card">
+      <h3>ℹ️ কেন এভাবে?</h3>
+      <p class="muted">টেলিগ্রামে একই টোকেন একসাথে দুই জায়গা থেকে চালানো যায় না
+        (“Conflict: terminated by other getUpdates request”)। তাই প্রতিটি আলাদা বট আলাদা
+        ছোট প্রসেসে চলে — কিন্তু <b>ডেটাবেজ একটাই</b>, তাই ইউজার, স্টোর, অর্ডার, ব্রডকাস্ট
+        সবখানে একই থাকে। একটা বট ব্লক/লিমিটে পড়লেও অন্যগুলো সেবা দিতে থাকে।</p>
+    </div>"""
+
+
+def admins_body(flash: str = "", warn: str = "") -> str:
+    """👥 কারা এই প্যানেল ও বট চালাতে পারবে — the multi-admin card."""
+    from app.services import credentials
+    rows = credentials.admin_details()
+    table_rows = []
+    for row in rows:
+        controls = ("<span class='pill'>মালিক</span>" if row["owner"]
+                    else f"<a class='btn bad' href='/admin/admins/remove/{row['user_id']}'>🗑 সরান</a>")
+        table_rows.append([
+            f"<b>{esc(row['name'] or '—')}</b>"
+            + (f"<div class='muted'>@{esc(row['username'])}</div>" if row["username"] else ""),
+            f"<code>{row['user_id']}</code>",
+            "✅ সংযুক্ত" if row["has_session"] else "—",
+            (fmt_ts(row["seen"], "%d %b %H:%M") if row["seen"] else "—"),
+            controls,
+        ])
+    table = ui.table(["নাম", "টেলিগ্রাম আইডি", "ইউজারবট সেশন", "সর্বশেষ দেখা", ""], table_rows,
+                     empty_row="কোনো অ্যাডমিন নেই")
+    note = f'<div class="flash">{esc(flash)}</div>' if flash else ""
+    warnbox = f'<div class="warnbox">{esc(warn)}</div>' if warn else ""
+    return f"""{note}{warnbox}
+    <div class="card">
+      <h3>👥 অ্যাডমিন যোগ করুন</h3>
+      <p class="muted">যাকে যোগ করবেন সে টেলিগ্রামে আপনার বটে <code>/start</code> দিয়ে প্যানেলে
+        ঢুকতে পারবে — এবং বটের সব অ্যাডমিন কমান্ড (<code>/br</code>, <code>/backup</code>…) ব্যবহার
+        করতে পারবে। আইডি জানতে ওই ব্যক্তি <b>@userinfobot</b>-কে <code>/start</code> দিলে পাবেন।
+        যে ব্যক্তি আগে বটে <code>/start</code> দিয়েছেন তাঁর আইডি Picker-এও পাবেন।</p>
+      <form method=post action="/admin/admins/add">
+        <label>টেলিগ্রাম আইডি (শুধু সংখ্যা)</label>
+        <input name="user_id" placeholder="123456789" required>
+        <button class="btn">➕ যোগ করুন</button>
+      </form>
+    </div>
+    <div class="card"><h3>🛡 বর্তমান অ্যাডমিন</h3>{table}</div>
+    <div class="card">
+      <h3>🔑 টোকেন-সহ পুরো ইনস্টল</h3>
+      <p class="muted">বট টোকেন, API ID/হ্যাশ আর অ্যাডমিন তালিকা ডেটাবেজেই সেভ থাকে — একবার
+        দিলে আর কখনো দিতে হয় না, নতুন হোস্টে ব্যাকআপ ফিরিয়ে আনলেই সব ফিরে আসে। কে কী দেখতে
+        পাবে সেটা ব্যাকআপ ফাইলে থাকে, তাই ফাইলটা কারো সাথে শেয়ার করবেন না।</p>
+      <a class="btn grey" href="/admin/backup">🗄 ব্যাকআপ ও হোস্ট বদল</a>
+    </div>"""
