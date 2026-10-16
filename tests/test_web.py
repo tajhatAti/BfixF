@@ -1329,3 +1329,70 @@ def test_a_new_host_can_restore_from_the_setup_screen(tmp_path, monkeypatch):
     assert response.status_code == 303
     assert db.stats()["users"] >= 1 and db.all_stores()[0]["name"] == "Origin store"
     assert db.user_peer(USER_ID)["access_hash"] == 4242         # broadcasts still work
+
+
+def test_an_older_versions_database_can_be_uploaded_to_the_panel(client, tmp_path):
+    """“পুরোনো ভার্সনের ডেটাবেজ সোজা সাইটে দিলে চলবে?” — হ্যাঁ, নিজে থেকেই বোঝে।"""
+    import sqlite3
+    path = str(tmp_path / "old.sqlite3")
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE users (user_id INTEGER PRIMARY KEY, name TEXT, username TEXT,
+          joined_at REAL, last_seen REAL, lang TEXT, sort_pref TEXT);
+        CREATE TABLE stores (id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER,
+          name TEXT, slug TEXT UNIQUE, created_at REAL, is_premium INTEGER,
+          cover TEXT, description TEXT);
+        CREATE TABLE files (id INTEGER PRIMARY KEY AUTOINCREMENT, store_id INTEGER,
+          name TEXT, kind TEXT, chat_id INTEGER, msg_id INTEGER, code TEXT UNIQUE,
+          size INTEGER, duration INTEGER, created_at REAL, views INTEGER DEFAULT 0);
+    """)
+    conn.execute("INSERT INTO users VALUES (900, 'পুরোনো মালিক', 'old_owner', 1.0, 2.0, 'bn', 'default')")
+    conn.execute("INSERT INTO stores (admin_id, name, slug, created_at, is_premium) "
+                 "VALUES (900, 'পুরোনো স্টোর', 'old-store', 3.0, 0)")
+    conn.execute("INSERT INTO files (store_id, name, kind, chat_id, msg_id, code, size, created_at) "
+                 "VALUES (1, 'পুরোনো ভিডিও', 'Video', -100, 12, 'f1', 500, 4.0)")
+    conn.commit()
+    conn.close()
+
+    blob = open(path, "rb").read()
+    response = client.post("/admin/backup/restore",
+                           files={"file": ("old.sqlite3", blob, "application/x-sqlite3")},
+                           data={"confirm": "yes"}, headers=_auth(), follow_redirects=False)
+    assert response.status_code == 303 and "flash=" in response.headers["location"]
+    assert [row["name"] for row in db.all_stores()] == ["পুরোনো স্টোর"]
+    assert db.user(900)["username"] == "old_owner"       # ব্যবহারকারীর আইডি অটুট
+    assert len(db.files_of(db.all_stores()[0]["id"])) == 1
+    page = client.get("/admin/backup", headers=_auth()).text
+    assert "ইনস্টল ফিরিয়ে আনা হয়েছে" in page
+    from app.services import portable
+    assert portable.local_backups()                       # ফিরে যাওয়ার রাস্তা আছে
+
+
+def test_a_standalone_bots_user_list_merges_into_the_panel(client, tmp_path):
+    """পুরোনো আলাদা বটের users.db → ইউজার যোগ হয়, বর্তমান ডেটা মুছে যায় না।"""
+    import sqlite3
+    _store("Living store")
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    path = str(tmp_path / "users.db")
+    conn = sqlite3.connect(path)
+    conn.executescript("CREATE TABLE users(id INTEGER PRIMARY KEY, blocked INTEGER DEFAULT 0,"
+                       " username TEXT, name TEXT);")
+    conn.executemany("INSERT INTO users VALUES (?,?,?,?)",
+                     [(7001, 0, "old1", "পুরোনো ১"), (7002, 1, "old2", "পুরোনো ২")])
+    conn.commit()
+    conn.close()
+
+    response = client.post("/admin/backup/restore",
+                           files={"file": ("users.db", open(path, "rb").read(),
+                                           "application/x-sqlite3")},
+                           data={"confirm": "yes"}, headers=_auth(), follow_redirects=False)
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert "flash=" in location and "orphan" not in location
+    from urllib.parse import unquote_plus
+    assert "যোগ করা হয়েছে" in unquote_plus(location)      # মেসেজটা স্পষ্ট
+    assert [row["name"] for row in db.all_stores()] == ["Living store"]   # স্টোর অটুট
+    assert db.user(USER_ID) is not None                   # বর্তমান ইউজারও অটুট
+    assert db.user(7001) is not None and db.user(7002) is not None
+    page = client.get("/admin/backup", headers=_auth()).text
+    assert "যোগ করা হয়েছে" in page and "কিছুই মুছে যায়নি" in page

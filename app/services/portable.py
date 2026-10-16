@@ -388,6 +388,265 @@ def _counts_bytes(raw: bytes) -> dict:
         conn.close()
 
 
+# ===================================================================== importers
+# Real life: the owner's data is usually *not* a brand new `.bfixf.gz` — it is the
+# database of an older version of this bot, the old `bot_db.json`, or the `users.db`
+# of the standalone broadcast bot. All of those are understood here, so moving over
+# never means typing the customer list again.
+KIND_FULL = "full"            # our envelope, or any SQLite with users+stores+files
+KIND_USERS = "users"          # a foreign database that only has a user list
+KIND_LEGACY_JSON = "legacy-json"    # the old bot_db.json
+KIND_EXPORT_JSON = "export-json"    # our own /admin/download/json
+KIND_UNKNOWN = "unknown"
+
+
+def _sqlite_tables(raw: bytes) -> set[str]:
+    conn = _connect_bytes(raw)
+    try:
+        return {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        conn.close()
+
+
+def _looks_like_users_db(tables: set[str]) -> bool:
+    """A standalone bot's `users.db`: it has users, but no stores/files of ours."""
+    return "users" in tables and not {"stores", "files"} & tables
+
+
+def inspect(data: bytes, *, allow_users_import: bool = True) -> dict:
+    """What *kind* of backup is this, and what will happen when it is applied?
+
+    The answer drives the wording everywhere (panel, bot, tests): a full backup
+    replaces the install, an older/foreign file is *merged* into it — nothing the
+    owner already has is thrown away.
+    """
+    if not data:
+        raise BackupError("ফাইলটা খালি।")
+    payload = data
+    if payload[:2] == b"\x1f\x8b":
+        try:
+            payload = gzip.decompress(payload)
+        except Exception as exc:
+            raise BackupError(f"ফাইলটা পড়া যাচ্ছে না ({exc})।") from exc
+
+    # 1) a SQLite database (ours, an older version of ours, or a foreign one)
+    if payload[:15] == b"SQLite format 3":
+        tables = _sqlite_tables(payload)
+        if {"users", "stores", "files"} <= tables:
+            return {"kind": KIND_FULL, "label": "পুরো ইনস্টল ব্যাকআপ",
+                    "merge": False, "counts": _counts_bytes(payload),
+                    "size": len(payload), "tables": sorted(tables)}
+        if allow_users_import and _looks_like_users_db(tables):
+            conn = _connect_bytes(payload)
+            try:
+                counts = _counts(conn)
+                columns = [row[1] for row in conn.execute("PRAGMA table_info(users)")]
+            finally:
+                conn.close()
+            return {"kind": KIND_USERS, "label": "শুধু ইউজার তালিকা (পুরোনো বট)",
+                    "merge": True, "counts": counts, "size": len(payload),
+                    "tables": sorted(tables), "user_columns": sorted(columns)}
+        raise BackupError("এই ডেটাবেজে আমাদের দরকারি টেবিল নেই (users/stores/files)।")
+
+    # 2) JSON: our envelope, our export, or the legacy bot_db.json
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except Exception as exc:
+        raise BackupError("এটা আমাদের ব্যাকআপ ফাইল না (JSON পড়া যায়নি)।") from exc
+    if not isinstance(document, dict):
+        raise BackupError("ব্যাকআপ ফাইলটা অদ্ভুত — JSON অবজেক্ট না।")
+
+    if str(document.get("magic") or "") == MAGIC:
+        checksum = str(document.get("checksum") or "")
+        if checksum and _fingerprint(str(document["db"]).encode("ascii")) != checksum:
+            raise BackupError("ফাইলের checksum মিলছে না — ফাইলটা অসম্পূর্ণ/বদলে গেছে।")
+        try:
+            raw = gzip.decompress(base64.b64decode(document["db"]))
+        except Exception as exc:
+            raise BackupError(f"ভিতরের ডেটাবেজ খোলা যাচ্ছে না ({exc})।") from exc
+        info = inspect(raw, allow_users_import=allow_users_import)
+        info.update({"magic": MAGIC, "created_at": document.get("created_at"),
+                     "created_at_text": document.get("created_at_text") or "",
+                     "note": document.get("note") or "",
+                     "source_host": document.get("source_host") or "",
+                     "checksum": checksum,
+                     "credentials_included": bool(document.get("credentials_included"))})
+        return info
+
+    if "user_details" in document or "premium_access" in document:
+        counts = {"users": len(document.get("user_details") or {}),
+                  "stores": sum(len(v or {}) for v in (document.get("stores") or {}).values()),
+                  "files": sum(len(f or {}) for v in (document.get("stores") or {}).values()
+                               for f in (v or {}).values())}
+        return {"kind": KIND_LEGACY_JSON, "label": "পুরোনো bot_db.json ব্যাকআপ",
+                "merge": True, "counts": counts, "size": len(payload),
+                "created_at_text": "", "credentials_included": False}
+
+    if "stores" in document and "users" in document:
+        counts = {"users": len(document.get("users") or {}),
+                  "stores": len(document.get("stores") or {}),
+                  "files": sum(len((s or {}).get("files") or {})
+                               for s in (document.get("stores") or {}).values())}
+        return {"kind": KIND_EXPORT_JSON, "label": "JSON এক্সপোর্ট",
+                "merge": True, "counts": counts, "size": len(payload),
+                "created_at_text": "", "credentials_included": False}
+
+    raise BackupError("চেনা যায়নি — এটা ব্যাকআপ ফাইল না।")
+
+
+def _apply_users_import(raw: bytes, source: str) -> dict:
+    """Merge a foreign user list into this install (nothing is deleted)."""
+    conn = _connect_bytes(raw)
+    try:
+        # the column order matters: `PRAGMA table_info` gives it, a set would not
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(users)")]
+        rows = list(conn.execute("SELECT * FROM users"))
+    finally:
+        conn.close()
+    before = _counts(str(db.path)).get("users", 0)
+    added = updated = blocked = 0
+    for row in rows:
+        values = {name: row[index] for index, name in enumerate(columns)}
+        uid = _int_or_zero(values.get("user_id") or values.get("id") or
+                           (row[0] if row else 0))
+        if uid <= 0:
+            continue
+        name = str(values.get("name") or "").strip()
+        username = str(values.get("username") or "").strip().lstrip("@")
+        existed = db.user(uid) is not None
+        try:
+            db.touch_user(uid, name or None, username or None)
+        except Exception:
+            continue
+        if existed:
+            updated += 1
+        else:
+            added += 1
+        if _int_or_zero(values.get("blocked")):
+            db.ban_user(uid, "পুরোনো বটের তালিকায় ব্লকড", 0)
+            blocked += 1
+    after = _counts(str(db.path)).get("users", 0)
+    log.info("user list imported from %s: +%s new, %s updated", source, added, updated)
+    return {"ok": True, "kind": KIND_USERS, "source": source, "merge": True,
+            "imported": {"added": added, "updated": updated, "blocked": blocked},
+            "counts_before": {"users": before}, "counts_after": {"users": after},
+            "safety_copy": "", "credentials_included": False,
+            "created_at_text": ""}
+
+
+def _apply_json_import(document: dict, kind: str, source: str) -> dict:
+    """Import an old JSON backup (legacy `bot_db.json` or our export)."""
+    before = _counts(str(db.path))
+    if kind == KIND_LEGACY_JSON:
+        import tempfile
+        handle, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(handle, "w", encoding="utf-8") as fh:
+            json.dump(document, fh, ensure_ascii=False)
+        checksum = _fingerprint(json.dumps(document, sort_keys=True).encode("utf-8"))
+        key = f"legacy_json:{checksum}"
+        if db.get_meta(key) == "yes":
+            os.unlink(path)
+            return {"ok": True, "kind": kind, "source": source, "merge": True,
+                    "imported": {"already": True}, "counts_before": before,
+                    "counts_after": _counts(str(db.path)), "safety_copy": "",
+                    "credentials_included": False, "created_at_text": ""}
+        db.set_meta("legacy_imported", "")            # allow this run to import once
+        try:
+            counters = db.migrate_legacy(path) or {}
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        db.set_meta(key, "yes")
+        imported = {key: value for key, value in (counters or {}).items() if value}
+    else:
+        imported = _import_export_document(document)
+    after = _counts(str(db.path))
+    return {"ok": True, "kind": kind, "source": source, "merge": True,
+            "imported": imported, "counts_before": before, "counts_after": after,
+            "safety_copy": "", "credentials_included": False, "created_at_text": ""}
+
+
+def _import_export_document(document: dict) -> dict:
+    """Create stores/files/users/grants from `db.export_dict()` shaped JSON."""
+    counters = {"users": 0, "stores": 0, "files": 0, "grants": 0}
+    for raw_uid, info in (document.get("users") or {}).items():
+        uid = _int_or_zero(raw_uid)
+        if uid <= 0:
+            continue
+        if db.user(uid) is None:
+            db.touch_user(uid, (info or {}).get("name"), (info or {}).get("username"))
+            counters["users"] += 1
+    for raw_store, store in (document.get("stores") or {}).items():
+        store = store or {}
+        name = str(store.get("name") or "").strip()
+        admin_id = _int_or_zero(store.get("admin_id"))
+        if not name or admin_id <= 0:
+            continue
+        existing = [row for row in db.stores_admin(admin_id) if row["name"] == name]
+        row = existing[0] if existing else db.create_store(admin_id, name)
+        if not existing:
+            counters["stores"] += 1
+        try:
+            db.update_store(row["id"], is_premium=int(store.get("is_premium") or 0),
+                            description=store.get("description") or "",
+                            slug=store.get("slug") or None)
+        except Exception:
+            pass
+        for old_fid, meta in (store.get("files") or {}).items():
+            meta = meta or {}
+            file_name = str(meta.get("name") or old_fid)
+            created = db.add_file(row["id"], file_name, meta.get("type") or "Video",
+                                  _int_or_zero(meta.get("chat_id")),
+                                  _int_or_zero(meta.get("msg_id")),
+                                  code=str(old_fid),
+                                  size=meta.get("size"))
+            if created:
+                counters["files"] += 1
+                if meta.get("views"):
+                    db._run("UPDATE files SET views = ? WHERE id = ?",
+                            (int(meta["views"]), created))
+    for grant in (document.get("grants") or []):
+        store_id = _int_or_zero((grant or {}).get("store_id"))
+        user_id = _int_or_zero((grant or {}).get("user_id"))
+        if store_id and user_id and db.grant_row(store_id, user_id) is None:
+            db.grant(store_id, user_id, (grant or {}).get("expires_at"),
+                     str((grant or {}).get("source") or "imported"))
+            counters["grants"] += 1
+    return counters
+
+
+def _int_or_zero(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def apply(data: bytes, *, source: str = "upload", keep_safety: bool = True) -> dict:
+    """Do the right thing for whatever the owner gave us.
+
+    * a full backup → `restore()` (replaces the install, with a safety copy),
+    * an older / foreign file → `*_import()` (merges, never deletes).
+    """
+    info = inspect(data)
+    if info["kind"] == KIND_FULL:
+        report = restore(data, source=source, keep_safety=keep_safety)
+        report.setdefault("kind", KIND_FULL)
+        report["merge"] = False
+        report["counts_before"] = report.get("counts_before") or info.get("counts") or {}
+        return report
+    payload = data
+    if payload[:2] == b"\x1f\x8b":
+        payload = gzip.decompress(payload)
+    if payload[:15] == b"SQLite format 3":
+        return _apply_users_import(payload, source)
+    document = json.loads(payload.decode("utf-8"))
+    return _apply_json_import(document, info["kind"], source)
+
+
 # --------------------------------------------------------------------- restore
 def safety_copy() -> str:
     """Write the *current* database next to the backups before a restore."""

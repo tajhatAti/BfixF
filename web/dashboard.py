@@ -3138,6 +3138,17 @@ def create_app() -> FastAPI:
         creds = ("এই ব্যাকআপে বট টোকেন/API আইডিও ছিল — সেটাও ফিরে এসেছে, নতুন হোস্টে "
                  "আলাদা করে কিছু দিতে হবে না।" if report.get("credentials_included") else
                  "ব্যাকআপে টোকেন ছিল না — <code>/setup</code>-এ একবার টোকেন/API আইডি দিন।")
+        if report.get("merge"):
+            imported = report.get("imported") or {}
+            bits = "".join(f"<li>{esc(str(key))}: <b>+{value}</b></li>"
+                           for key, value in imported.items() if value)
+            return (f"<div class='note ok'><b>✅ {esc(report.get('kind_label') or 'পুরোনো ব্যাকআপ')} "
+                    f"যোগ করা হয়েছে</b> ({esc(report.get('source') or '')})"
+                    f"<ul>{bits or '<li>সবই আগে থেকে ছিল — নতুন কিছু যোগ হয়নি</li>'}</ul>"
+                    f"<p>বর্তমান ডেটার কিছুই মুছে যায়নি — নতুনগুলো যোগ হয়েছে।</p>"
+                    f"<p class='muted'>পুরোনো ইনস্টলের ইউজারদের অ্যাক্সেস-হ্যাশ থাকে না; "
+                    f"তারা আবার <code>/start</code> দিলে বা ব্রডকাস্টের সময় নিজে থেকেই "
+                    f"সেটা শিখে নেওয়া হয়।</p></div>")
         return (f"<div class='note ok'><b>✅ ইনস্টল ফিরিয়ে আনা হয়েছে</b> "
                 f"({esc(report.get('created_at_text') or '')} · {esc(report.get('source') or '')})"
                 f"<ul>{pairs}</ul><p>{creds}</p>"
@@ -3146,18 +3157,28 @@ def create_app() -> FastAPI:
                 f"ভুল হয়ে গেলে ওটা দিয়েই ফেরা যায়।</p></div>")
 
     def _run_restore(blob: bytes, source: str) -> tuple[bool, str]:
-        """Restore and remember the report. Returns (ok, message-for-the-user)."""
+        """Apply whatever the owner gave us (full backup *or* an older format)."""
         try:
-            report = portable_service.restore(blob, source=source)
+            info = portable_service.inspect(blob)
+            report = portable_service.apply(blob, source=source)
         except portable_service.BackupError as exc:
             return False, str(exc)
         except Exception as exc:                              # pragma: no cover - defensive
             log.exception("restore failed")
             return False, f"রিস্টোর ব্যর্থ: {exc}"
+        report["kind_label"] = info.get("label") or ""
         _LAST_RESTORE["report"] = report
         audit_service.record("restore_done", ref=source,
-                             detail=str(report.get("counts_after", {}))[:250])
+                             detail=f"{info.get('kind')} {report.get('counts_after', {})}"[:250])
         after = report.get("counts_after") or {}
+        if report.get("merge"):
+            imported = report.get("imported") or {}
+            bits = ", ".join(f"{key} +{value}" for key, value in imported.items()
+                             if isinstance(value, int) and value)
+            return True, (f"✅ {info.get('label') or 'পুরোনো ব্যাকআপ'} যোগ করা হয়েছে"
+                          + (f" ({bits})" if bits else "")
+                          + f" — এখন মোট {after.get('users', 0)} ইউজার, "
+                            f"{after.get('stores', 0)} স্টোর (আগের ডেটা মুছিনি)")
         return True, (f"✅ ইনস্টল ফিরিয়ে আনা হয়েছে — {after.get('users', 0)} ইউজার, "
                       f"{after.get('stores', 0)} স্টোর, {after.get('files', 0)} ফাইল")
 
@@ -3165,7 +3186,7 @@ def create_app() -> FastAPI:
         return f"""<div class="card"><h4>{heading}</h4>
           <p class="muted">{hint}</p>
           <form method=post action="{action}" enctype="multipart/form-data">
-            <label>ব্যাকআপ ফাইল (.bfixf.gz / .sqlite3 / .json)</label>
+            <label>ব্যাকআপ ফাইল (.bfixf.gz / .sqlite3 / .json / পুরোনো users.db)</label>
             <input type="file" name="file"
                    accept=".gz,.json,.sqlite3,.db,.bfixf,application/gzip">
             <label>…অথবা ব্যাকআপ কোড পেস্ট করুন (BFIXF1:…)</label>
@@ -3211,9 +3232,11 @@ def create_app() -> FastAPI:
             <p class="muted">⚠️ ফাইল/কোডে টোকেন থাকতে পারে — শুধু নিজের কাছে রাখুন।<br>
             {code_hint}</p>
           </div>
-          {_restore_forms("/admin/backup/restore", heading="⬆️ ২. অন্য জায়গার ইনস্টল ফিরিয়ে আনুন",
-                          hint="এই হোস্টের সব ডেটা ব্যাকআপের ডেটাতে বদলে যাবে — তাই আগের "
-                               "অবস্থা নিজে থেকেই সেভ করা হয়।")}
+          {_restore_forms("/admin/backup/restore", heading="⬆️ ২. অন্য জায়গার ডেটা ফিরিয়ে আনুন",
+                          hint="নতুন ব্যাকআপ (.bfixf.gz), পুরোনো ভার্সনের ডেটাবেজ (.sqlite3), "
+                               "পুরোনো bot_db.json, আর পুরোনো বটের users.db — সবই চলে। "
+                               "পুরো ব্যাকআপ হলে এই ইনস্টলের ডেটা বদলে যায় (আগেরটা নিজে থেকেই "
+                               "সেভ হয়); পুরোনো ফাইল হলে শুধু <b>যোগ</b> হয় — কিছু মোছে না।")}
         </div>
         <div class="card"><h4>🗂 সার্ভারে সেভ করা ব্যাকআপ</h4>{_backup_local_table()}</div>
         <div class="card"><h4>🚚 নতুন হোস্টে নেওয়ার ধাপ</h4><ol class="steps">{steps}</ol></div>

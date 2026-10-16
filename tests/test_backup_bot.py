@@ -218,3 +218,34 @@ async def test_an_ordinary_document_is_not_treated_as_a_backup(bot_ctx):
     event.message.file = SimpleNamespace(name="holiday.mp4", size=99)
     await call(portable_handlers.restore_document, event)
     assert not portable_handlers._pending and not event.sent
+
+
+@pytest.mark.asyncio
+async def test_the_bot_merges_an_older_bots_user_list(bot_ctx, tmp_path):
+    """পুরোনো বটের users.db বটে পাঠালে সেটা যোগ হয় — বদলে যায় না।"""
+    import sqlite3
+    db.touch_user(31337, "নতুন ইনস্টলের ইউজার", "newbie")
+    path = str(tmp_path / "users.db")
+    conn = sqlite3.connect(path)
+    conn.executescript("CREATE TABLE users(id INTEGER PRIMARY KEY, blocked INTEGER DEFAULT 0,"
+                       " username TEXT, name TEXT);")
+    conn.execute("INSERT INTO users VALUES (4242, 0, 'oldie', 'পুরোনো ইউজার')")
+    conn.execute("INSERT INTO users VALUES (4243, 1, 'banned_guy', 'ব্লক করা')")
+    conn.commit()
+    conn.close()
+
+    event = Ev("", document=SimpleNamespace(id=1), client=BytesClient(open(path, "rb").read()))
+    await call(portable_handlers.restore_document, event)
+    summary, buttons = event.sent[-1]
+    assert "পুরোনো বটের" in summary and "ইউজার তালিকা" in summary   # চিনে নিয়েছে
+    assert "যোগ" in summary and "মুছে যাবে না" in summary
+    assert buttons and len(buttons[0]) == 2
+
+    confirm = Ev("")
+    await call(portable_handlers.restore_confirm, confirm, "go")
+    text = " ".join(t or "" for t, _ in confirm.sent)
+    assert "যোগ করা হয়েছে" in text and "অক্ষত" in text
+    assert "+2" in text                                     # কতজন যোগ হলো
+    assert db.user(4242) is not None and db.user(31337) is not None
+    assert db.is_banned(4243) is True                       # ব্লকড ছিল → ব্যান
+    assert not portable_handlers._pending

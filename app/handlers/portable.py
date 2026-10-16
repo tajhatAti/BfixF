@@ -54,9 +54,9 @@ def _confirm_buttons(admin_id: int) -> list[list[Button]]:
 
 
 def _summary(data: bytes) -> tuple[bool, str]:
-    """Read the backup and describe it — never touches the live database."""
+    """Read the file and describe it — never touches the live database."""
     try:
-        info = portable.describe(data)
+        info = portable.inspect(data)
     except portable.BackupError as exc:
         return False, f"❌ {esc(str(exc))}"
     counts = info.get("counts") or {}
@@ -66,15 +66,20 @@ def _summary(data: bytes) -> tuple[bool, str]:
                       if key in counts)
     made = (f"🕘 বানানো: {esc(info.get('created_at_text') or '')}<br>"
             if info.get("created_at_text") else "")
+    if info.get("merge"):
+        # an older version's database / another bot's user list — added, not swapped
+        note = ("ℹ️ এটা <b>পুরোনো ফরম্যাট</b> — এই ইনস্টলের ডেটা মুছবে না, শুধু "
+                "<b>যোগ</b> হবে।" if info["kind"] != portable.KIND_USERS else
+                "ℹ️ এটা পুরোনো বটের <b>ইউজার তালিকা</b> — আপনার বর্তমান ডেটার সাথে "
+                "যোগ হবে, কিছু মোছবে না।")
+        return True, (f"🔎 <b>{esc(info.get('label') or 'পুরোনো ব্যাকআপ')}</b><br>"
+                      f"{made}{bits}<br>{note}")
     creds = ("🔑 টোকেনও আছে — নতুন হোস্টে কিছু সেট করতে হবে না।"
              if info.get("credentials_included") else
              "🔑 টোকেন নেই — /setup-এ একবার টোকেন/API আইডি দিতে হবে।")
-    text = (f"🔎 <b>ব্যাকআপে যা আছে</b><br>{made}{bits}<br>{creds}<br>"
-            f"<span class='muted'>সাইজ: {info.get('size', 0) // 1024} KB · "
-            f"checksum {esc(info.get('checksum') or '')}</span>")
-    if not info.get("ok"):
-        return False, f"❌ {esc(info.get('error') or 'ব্যাকআপটা এই বটের না।')}"
-    return True, text
+    return True, (f"🔎 <b>ব্যাকআপে যা আছে</b><br>{made}{bits}<br>{creds}<br>"
+                  f"<span class='muted'>সাইজ: {info.get('size', 0) // 1024} KB · "
+                  f"checksum {esc(info.get('checksum') or '')}</span>")
 
 
 async def _offer(event, admin_id: int, data: bytes, source: str) -> None:
@@ -84,13 +89,14 @@ async def _offer(event, admin_id: int, data: bytes, source: str) -> None:
         await event.respond(summary)
         return
     _pending[admin_id] = data
-    from app import config as cfg
-    if admin_id == (cfg.ADMIN_IDS[0] if cfg.ADMIN_IDS else 0):
+    merge = bool(portable.inspect(data).get("merge"))
+    if merge:
+        note = ("✅ চাপলে উপরের ডেটাগুলো এই ইনস্টলে <b>যোগ</b> হবে — এখনকার কিছুই "
+                "মুছে যাবে না।")
+    else:
         note = ("⚠️ <b>এখনকার সব ডেটা এই ব্যাকআপ দিয়ে বদলে যাবে।</b> "
                 "আগের অবস্থার সেফটি কপি নিজে থেকেই সেভ হয়ে যাবে, তাই ভুল হলে "
                 "ফেরানো যাবে।")
-    else:
-        note = "⚠️ এখনকার সব ডেটা বদলে যাবে (আগেরটার সেফটি কপি সেভ হবে)।"
     await event.respond(f"{summary}\n\n{note}\n\nসোর্স: <code>{esc(source)}</code>",
                         buttons=_confirm_buttons(admin_id))
 
@@ -103,6 +109,10 @@ def _restore_help() -> str:
             "লিখলেও হয়।\n"
             "৩️⃣ অথবা <code>BFIXF1:…</code> কোডগুলো (একটা/কয়েক টুকরো) পরপর পাঠান — "
             "নিজেই জোড়া লাগিয়ে নেবে।\n\n"
+            "🧓 <b>পুরোনো ভার্সনের ডেটাবেজও চলবে:</b> এই বটের আগের ভার্সনের "
+            "<code>.sqlite3</code>, পুরোনো <code>bot_db.json</code>, এমনকি পুরোনো "
+            "আলাদা বটের <code>users.db</code> পাঠালেও বট চিনে নেয় — তখন শুধু "
+            "<b>যোগ</b> হয়, আপনার বর্তমান ডেটা মুছে যায় না।\n\n"
             "তারপর বট দেখাবে ব্যাকআপে কত ইউজার/স্টোর/ফাইল আছে; <b>✅ ফিরিয়ে আনুন</b> "
             "চাপলেই পুরো ইনস্টল আগের মতো। আগের অবস্থার সেফটি কপি নিজে থেকেই সেভ হয়।")
 
@@ -206,9 +216,9 @@ async def restore_confirm(event, rest: str) -> None:
     if not data:
         await event.answer("কোনো ব্যাকআপ অপেক্ষায় নেই", alert=True)
         return
-    await event.answer("ফিরিয়ে আনা হচ্ছে…")
+    await event.answer("কাজ শুরু হচ্ছে…")
     try:
-        report = portable.restore(data, source="telegram")
+        report = portable.apply(data, source="telegram")
     except portable.BackupError as exc:
         await event.respond(f"❌ রিস্টোর হয়নি: {esc(str(exc))}")
         return
@@ -231,6 +241,19 @@ async def restore_confirm(event, rest: str) -> None:
         log.debug("credential reload after restore failed", exc_info=True)
     after = report.get("counts_after") or {}
     before = report.get("counts_before") or {}
+    if report.get("merge"):
+        imported = report.get("imported") or {}
+        bits = "\n".join(f"• {esc(str(key))}: <b>+{value}</b>"
+                          for key, value in imported.items() if value)
+        await event.respond(
+            "✅ <b>যোগ করা হয়েছে</b> — বর্তমান ডেটা অক্ষত\n\n"
+            + (bits or "• সবই আগে থেকে ছিল")
+            + f"\n\n📊 এখন: {after.get('users', 0)} ইউজার, "
+              f"{after.get('stores', 0)} স্টোর, {after.get('files', 0)} ফাইল"
+            + "\nℹ️ পুরোনো ইনস্টলের ইউজারদের অ্যাক্সেস-হ্যাশ থাকে না — তারা আবার "
+              "<code>/start</code> দিলে (বা ব্রডকাস্টের সময়) সেটা নিজে থেকেই "
+              "শিখে নেওয়া হয়।")
+        return
     await event.respond(
         "✅ <b>ইনস্টল ফিরিয়ে আনা হয়েছে</b>\n\n"
         + "\n".join(f"• {label}: {before.get(key, 0)} → <b>{after.get(key, 0)}</b>"
