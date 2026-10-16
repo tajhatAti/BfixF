@@ -51,6 +51,7 @@ from app import runtime                                                       # 
 from app.logger import log, setup_logging                                     # noqa: E402
 from app.services import quickcast as quickcast_service                          # noqa: E402
 from app.services import audit as audit_service                                   # noqa: E402
+from web import adminui as ui                                                    # noqa: E402
 from app.services import (access, basepath, billing, bot_texts, broadcast,    # noqa: E402
                           channels, credentials, feed as feed_service, forcejoin,
                           secrets_guard, settings)
@@ -498,88 +499,59 @@ PUBLIC_THEME_CSS = """
  ::selection { background:var(--accent); color:#14110a; }
 """
 
-ADMIN_THEME_CSS = """
- /* “Print” workspace: black, white and one grey. No blue, no teal, no gradient —
-    a dashboard that looks like a printed page and reads the same on any screen. */
- :root { color-scheme:light; --bg:#f2f2f0; --surface:#ffffff; --surface-2:#f7f7f5; --sidebar:#0d0d0d;
-   --ink:#101010; --muted:#6f6f6b; --line:#e2e2dd; --line-strong:#cdcdc6;
-   --accent:#111111; --accent-dark:#000000; --accent-soft:#f0f0ec; --teal:#111111;
-   --ok:#111111; --ok-soft:#f0f0ec; --warn:#4a4a46; --warn-soft:#f2f2ee;
-   --bad:#b3261e; --bad-soft:#fbeeec;
-   --r:6px; --shadow:none; --shadow-lg:0 12px 30px rgba(0,0,0,.10); }
- body { background:var(--bg); font-family:"Hind Siliguri","Bricolage Grotesque",system-ui,"Noto Sans Bengali",sans-serif; }
- h1,h2,h3,h4 { font-family:"Bricolage Grotesque","Hind Siliguri",sans-serif; font-weight:700; letter-spacing:-.01em; }
- h3 { margin-top:30px; padding-bottom:8px; border-bottom:1px solid var(--ink); }
- h4 { margin-top:24px; letter-spacing:.01em; }
- a { color:var(--ink); text-decoration:underline; text-decoration-color:#c9c9c4; text-underline-offset:3px; }
- a:hover { color:#000; text-decoration-color:#000; }
- code { color:#111; background:#f2f2ee; border-color:var(--line-strong); border-radius:4px; }
- /* sidebar: solid black plate, hairline separators */
- aside.side { background:var(--sidebar); border:0; color:#d8d8d4; padding:18px 12px 22px; }
- aside.side .brand { color:#fff; letter-spacing:-.01em; }
- aside.side a { color:#b9b9b4; border-radius:4px; padding:8px 10px; font-size:13.5px; }
- aside.side a:hover { color:#fff; background:#202020; }
- aside.side a.on { color:#0d0d0d; background:#fff; font-weight:700; }
- aside.side .grp { color:#7c7c78; letter-spacing:.1em; margin:18px 10px 6px; }
- .logo { background:#fff; color:#0d0d0d; border-radius:4px; box-shadow:none; }
- .topbar { background:transparent; border-bottom:1px solid var(--line-strong); backdrop-filter:none; }
- .topbar h1 { font-size:20px; font-weight:700; letter-spacing:-.01em; }
- .burger { color:var(--ink); background:#fff; border-color:var(--line-strong); border-radius:4px; }
- .status { color:var(--muted); background:#fff; border-color:var(--line); border-radius:3px; }
- .status.on i { background:#111; box-shadow:0 0 0 3px #e6e6e2; }
- .eyebrow { color:var(--muted); letter-spacing:.18em; }
- /* cards become printed panels: square, hairline, no shadow */
- .card, details, .settings-section summary { background:var(--surface); border:1px solid var(--line-strong);
-   border-radius:var(--r); box-shadow:none; }
- .card .l { text-transform:uppercase; letter-spacing:.08em; font-size:10px; }
- .card .n { color:var(--ink); font-variant-numeric:tabular-nums; }
- table { border-radius:0; border-color:var(--line-strong); box-shadow:none; }
- th { color:#111; background:#f2f2ee; border-bottom:1px solid var(--line-strong); }
- th,td { border-bottom-color:#eaeae5; }
- tbody tr:hover td { background:#fafaf8; }
- /* buttons: solid black, or outlined — nothing in between */
- a.btn,button { color:#fff; background:#111; border-radius:3px; box-shadow:none; letter-spacing:.01em; }
- a.btn:hover,button:hover { color:#fff; background:#000; box-shadow:none; }
- a.ok,button.ok { color:#fff; background:#111; } a.ok:hover,button.ok:hover { color:#fff; background:#000; }
- a.bad,button.bad { color:#fff; background:var(--bad); } a.bad:hover,button.bad:hover { color:#fff; background:#8f1d17; }
- a.grey,button.grey { color:var(--ink); background:#fff; border-color:var(--line-strong); }
- a.grey:hover,button.grey:hover { color:#000; background:#f2f2ee; border-color:#111; }
- a.warn,button.warn { color:#111; background:#f2f2ee; border-color:var(--line-strong); }
- a.warn:hover,button.warn:hover { color:#fff; background:#111; }
- input,textarea,select { border-radius:3px; background:#fff; border-color:var(--line-strong); }
- input:focus,textarea:focus,select:focus { border-color:#111; box-shadow:0 0 0 2px rgba(0,0,0,.08); }
- input[type=checkbox],input[type=radio] { accent-color:#111; }
- .pill, .badge { color:#111; background:#f2f2ee; border-color:var(--line-strong); border-radius:3px; }
- .flash { color:#111; border-left:3px solid #111; }
- .warnbox { color:#111; background:#f7f7f4; border-color:var(--line-strong); border-left:3px solid #111; }
- .bar>i { background:#111; }
- .step .num { color:#fff; background:#111; }
- .spin { border-color:#e6e6e2; border-top-color:#111; }
- ::selection { background:#111; color:#fff; }
- /* quick actions on the overview */
- .quick { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:10px; margin:6px 0 22px; }
- .quick a { display:flex; gap:11px; align-items:center; padding:13px 14px; background:#fff;
-   border:1px solid var(--line-strong); border-radius:var(--r); text-decoration:none; transition:border-color .12s,transform .12s; }
- .quick a:hover { border-color:#111; transform:translateY(-1px); }
- .quick .qi { width:34px; height:34px; flex:0 0 auto; display:grid; place-items:center; background:#111; color:#fff;
-   border-radius:3px; font-size:15px; }
- .quick b { display:block; font-size:13.5px; color:var(--ink); }
- .quick span { display:block; font-size:11.5px; color:var(--muted); }
- /* collapsible groups: works with zero JavaScript */
- details.navgrp { margin:0; }
- details.navgrp > summary { cursor:pointer; list-style:none; padding:7px 10px; color:#8a8a86; font-size:10px;
-   font-weight:800; letter-spacing:.1em; text-transform:uppercase; }
- details.navgrp > summary::-webkit-details-marker { display:none; }
- details.navgrp > summary:after { content:" ›"; float:right; color:#5c5c58; }
- details.navgrp[open] > summary:after { content:" ⌄"; }
- details.navgrp > summary:hover { color:#fff; }
- @media (min-width:901px) {
-   .shell { padding:14px; gap:14px; }
-   aside.side { top:14px; height:calc(100vh - 28px); border-radius:10px; }
-   .topbar { padding-left:6px; padding-right:6px; }
-   .content main { padding-top:10px; }
- }
-"""
+#: The admin look lives in `web/adminui.py` (design system + components).
+
+
+
+#: Bumped by hand when the panel changes so the owner can see what is deployed.
+PANEL_VERSION = "3.4"
+
+#: One line under the title of every admin page — what the page is *for*. Empty
+#: values simply print nothing, so a new page can be added before its blurb.
+PAGE_BLURBS: dict[str, str] = {
+    "/admin/stores": "স্টোর তৈরি, এডিট, প্রিমিয়াম/ফ্রি আর প্রতিটা স্টোরের চ্যানেল।",
+    "/admin/files": "সব ভিডিও/ছবি — ক্যাশ করা, এক-ক্লিকে ব্রডকাস্ট, ডুপ্লিকেট পরিষ্কার।",
+    "/admin/users": "কে কতটা অ্যাক্টিভ, কে কী কিনেছে — সার্চ, ব্যান, গ্র্যান্ট, মেসেজ।",
+    "/admin/orders": "পেমেন্ট অর্ডার — কে কী পাঠিয়েছে, অনুমোদন, বাতিল।",
+    "/admin/links": "লিমিটেড লিংক — কতবার, কতজন, কে নিয়েছে তার হিসাব।",
+    "/admin/analytics": "ফানেল, ডেড ফাইল, কনভার্শন — সংখ্যায় কনটেন্টের অবস্থা।",
+    "/admin/settings": "বট, সাইট, পেমেন্ট, ব্রডকাস্ট — সব সেটিং এক জায়গায়, রিস্টার্ট ছাড়াই।",
+    "/admin/texts": "বটের প্রতিটি মেসেজের ভাষা নিজে লিখুন (বাংলা/English)।",
+    "/admin/channels": "যেসব চ্যানেল বট ব্যবহার করে — ফোর্স-জয়েন গেট আর প্রতি স্টোরের ক্যাশ।",
+    "/admin/session": "Telegram সেশন — বট ও ইউজারবট সংযোগ, অবস্থা ও পুনরায় লগইন।",
+    "/admin/self-test": "নিজে নিজে পরীক্ষা — কী ঠিক, কী নষ্ট, আর তার সমাধান।",
+    "/admin/logs": "সার্ভারের লাইভ লগ — সমস্যা হলে প্রথমে এখানেই দেখুন।",
+    "/admin/emergency": "জরুরি সুইচ — ক্যাশ আবার কপি, মেইনটেন্যান্স, ব্যাকআপ।",
+    "/admin/security": "পাসওয়ার্ড, সেশন, সিক্রেট ও অ্যাক্সেস নিয়ন্ত্রণ।",
+    "/admin/digest": "সাপ্তাহিক নতুন-ভিডিও ডাইজেস্ট পাঠানোর নিয়ন্ত্রণ।",
+    "/admin/reel": "হোম পেজের অটো-প্লে রিল — কোনটা আগে, কতগুলো, সাউন্ড।",
+    "/admin/download": "SQLite/JSON/CSV — ডেটা ব্যাকআপ ও এক্সপোর্ট।",
+    "/setup": "BotFather টোকেন, API আইডি/হ্যাশ ও অ্যাডমিন আইডি — একবারই লাগে।",
+}
+
+
+def status_tag(value: str) -> str:
+    """Status pill for a campaign/order row (labels live in `web.adminui`)."""
+    return ui.tag(str(value or ""))
+
+
+def broadcast_today(stats: dict) -> int:
+    """How many messages went out today — the “is it alive?” number on the overview."""
+    try:
+        events = db.events_by_day(1)
+        return int(events[0].get("delivered", 0)) if events else 0
+    except Exception:
+        return 0
+
+
+def _nav_trail(active: str, title: str) -> tuple[str, str]:
+    """Where the current page sits in the sidebar (group, page label)."""
+    for group, items in ADMIN_NAV:
+        for href, _icon, label in items:
+            if href == active or (href != "/admin" and active.startswith(href + "/")):
+                clean = group.split(" ", 1)[-1]
+                return clean, label
+    return "পেজ", title
 
 
 def _status_pill() -> str:
@@ -956,8 +928,15 @@ def layout(title: str, body: str, active: str = "",
 <meta property="og:site_name" content="{brand}">{seo}
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700;800&family=Hind+Siliguri:wght@400;500;600&display=swap">
-<style>{CSS}</style><style>{ADMIN_THEME_CSS if (active.startswith(("/admin", "/setup")) or title == "Sign in") else PUBLIC_THEME_CSS}</style></head>"""
+<style>{CSS}</style><style>{ui.THEME_CSS if (active.startswith(("/admin", "/setup")) or title == "Sign in") else PUBLIC_THEME_CSS}</style></head>"""
     if active.startswith("/admin"):
+        # A page that did not write its own heading still gets one, so every screen
+        # starts the same way (title + one-line explanation + the section it is in).
+        if 'class="page-heading"' not in body:
+            group, label = _nav_trail(active, title)
+            blurb = PAGE_BLURBS.get(active, "")
+            body = ui.page_head(title, blurb, eyebrow=group) + body
+
         def _nav_on(href: str) -> bool:
             if href == "/admin":
                 return active == href
@@ -974,25 +953,40 @@ def layout(title: str, body: str, active: str = "",
             return f'<details class="navgrp"{opened}><summary>{name}</summary>{links}</details>'
 
         groups = "".join(_group(name, items) for name, items in ADMIN_NAV)
+        # The shell: black rail · hairline topbar with a breadcrumb, the palette
+        # trigger and the bot state · the page body · a quiet footer.
+        crumb_html = ui.crumbs(("Overview", "/admin"), _nav_trail(active, title))
         page = f"""{head}<body>
 <div class="shell">
   <aside class="side">
-    <div class="brand"><span class="logo">🎬</span>{brand}</div>
+    <div class="brand"><span class="logo">🎬</span>
+      <span>{brand}<small>control room</small></span></div>
     {groups}
-    <div class="grp">ACCOUNT</div>
-    <a href="/"><span class="ic">↗</span>Open public site</a>
-    <a href="/admin/logout"><span class="ic">⇥</span>Sign out</a>
+    <div class="rail-foot">
+      <a href="/" target="_blank" rel="noopener"><span class="ic">↗</span>পাবলিক সাইট দেখুন</a>
+      <a href="/admin/audit"><span class="ic">🧾</span>অ্যাডমিন অ্যাকশন লগ</a>
+      <a href="/admin/logout"><span class="ic">⇥</span>সাইন আউট</a>
+      <span>v{PANEL_VERSION} · বট + সাইট একই ডেটাবেজ</span>
+    </div>
   </aside>
   <div class="content">
     <div class="topbar">
-      <div class="row"><button class="burger" onclick="document.body.classList.toggle('nav')">☰</button>
-        <h1>{html.escape(title)}</h1></div>
-      {_status_pill()}
+      <div class="row">
+        <button class="burger" aria-label="মেনু" onclick="document.body.classList.toggle('nav')">☰</button>
+        <div class="crumbs">{crumb_html}</div>
+      </div>
+      <div class="row">
+        <button class="kbd-btn" id="palette-open" type="button">🔎 <span>খুঁজুন</span>
+          <kbd>Ctrl</kbd><kbd>K</kbd></button>
+        {_status_pill()}
+      </div>
     </div>
     <main>{body}</main>
-    <footer>Telegram store bot · ফাইল বট নিজেই পাঠায়</footer>
+    <footer>Telegram store bot · প্রতিটি ফাইল বট নিজেই পাঠায় ·
+      সমস্যা হলে <a href="/admin/emergency">জরুরি পেজ</a> · লগ <a href="/admin/logs">এখানে</a></footer>
   </div>
 </div>
+{ui.PALETTE_JS}
 <script>document.addEventListener('click',function(e){{if(document.body.classList.contains('nav')&&!e.target.closest('aside')&&!e.target.closest('.burger'))document.body.classList.remove('nav')}})</script>
 </body></html>"""
     else:
@@ -1064,7 +1058,7 @@ def setup_page() -> str:
     back = ""
     page = f"""<!doctype html><html lang="bn"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><base href="__BASEPATH__/">
-<title>সেটআপ · {brand}</title><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700;800&family=Hind+Siliguri:wght@400;500;600&display=swap"><style>{CSS}</style><style>{ADMIN_THEME_CSS}</style></head><body>
+<title>সেটআপ · {brand}</title><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700;800&family=Hind+Siliguri:wght@400;500;600&display=swap"><style>{CSS}</style><style>{ui.THEME_CSS}</style></head><body>
 <div class="wiz">
   <div class="head"><div class="logo">🤖</div>
     <h2>{"বট কানেকশন" if configured else "চলুন বটটা চালু করি"}</h2>
@@ -1921,36 +1915,77 @@ def create_app() -> FastAPI:
             else:
                 reach_note = (f'<div class="flash">📡 সব {reach["total"]} ইউজারের কাছে '
                               f'ব্রডকাস্ট পৌঁছাবে ✅</div>')
+        cache_warning = ""
         if settings.get_str("STORAGE_CHANNEL_WARNING", ""):
-            reach_note += (f'<div class="warnbox">🎞 ক্যাশ চ্যানেল সমস্যা: '
-                           f'{esc(settings.get_str("STORAGE_CHANNEL_WARNING"))} '
-                           f'<a href="/admin/channels">চ্যানেল পেজে গিয়ে ঠিক করুন</a></div>')
+            cache_warning = ui.note(
+                f"🎞 <b>ক্যাশ চ্যানেল সমস্যা</b> — "
+                f"{esc(settings.get_str('STORAGE_CHANNEL_WARNING'))}<br>"
+                f"<a href='/admin/channels'>📡 চ্যানেল পেজে ঠিক করুন</a> · "
+                f"বটে <code>/storageset probe</code> চাপলেও দেখা যাবে।", "bad")
+        try:
+            recent_actions = audit_service.recent(limit=6)
+        except Exception:
+            recent_actions = []
+        activity_block = ""
+        if recent_actions:
+            activity_block = (
+                "<h3>🕒 এইমাত্র যা হলো</h3>"
+                + ui.timeline([(fmt_ts(row.get("ts"), "%d %b · %H:%M"),
+                                esc(audit_service.label(row.get("name")))
+                                + (f" <span class='muted'>{esc(str(row.get('detail') or ''))[:70]}</span>"
+                                   if row.get("detail") else ""))
+                               for row in recent_actions])
+                + '<p class="muted"><a href="/admin/audit">সম্পূর্ণ '
+                  'অ্যাকশন লগ দেখুন →</a></p>')
+        # ---- design system pieces (web/adminui.py) -------------------------
+        currency = settings.get_str("CURRENCY", "৳")
+        brand = settings.get_str("WEB_TITLE", "Store Bot") or "Store Bot"
+        kpis = ui.kpi_row(
+            ui.kpi("ইউজার", stats["users"], sub=f"গ্রান্ট <b>{stats['grants']}</b>"),
+            ui.kpi("ভিডিও/ফাইল", stats["files"], sub=f"স্টোর <b>{stats['stores']}</b>"),
+            ui.kpi("ভিউ", stats["views"], sub=f"টিকেট <b>{stats['tickets_open']}</b>"),
+            ui.kpi("আয়", money(revenue["total"], currency),
+                   sub=f"⏳ পেন্ডিং <b>{revenue['pending']}</b>"),
+            ui.kpi("আজকের পাঠানো", broadcast_today(stats),
+                   sub=f"বট <b>{'অনলাইন' if runtime.bot_online() else 'অফলাইন'}</b>"),
+        )
+        bot_note = ui.note(
+            f"বট <b>{'অনলাইনে চলছে' if runtime.bot_online() else 'এখন অফলাইন'}</b> — "
+            + ("ব্রডকাস্ট येখনই যাবে, ফাইল সাথে সাথে পৌঁছাবে।" if runtime.bot_online()
+               else "যা পাঠাবেন সব কিউতে থাকবে; <code>/setup</code> বা "
+                    "<a href='/admin/session'>Telegram session</a> দেখে ঠিক করুন।"),
+            "" if runtime.bot_online() else "warn",
+        )
+        # `ADMIN_QUICK` labels carry their own markup (`Videos &amp; files`), so they
+        # are used as author-written HTML — escaping them twice shows “&amp;amp;”.
+        quick = "".join(
+            f'<a href="{href}"><span class="qi">{icon}</span><span><b>{label}</b>'
+            f'<span>{esc(note)}</span></span></a>' for icon, label, href, note in ADMIN_QUICK)
+        campaign_rows = [
+            [f"#{c['id']}", esc(c["title"]),
+             esc(broadcast.audience_label(c["audience"])),
+             status_tag(c["status"]), f"{c['sent']}/{c['total']}",
+             f"<a class='btn grey' href='/admin/broadcast/{c['id']}'>খুলুন</a>"]
+            for c in recent]
         body = f"""
-        <div class="page-heading"><div><p class="eyebrow">AHAD ORGEX / OVERVIEW</p>
-          <h2>Welcome back</h2><p class="muted">আপনার content, audience ও orders—সব এক জায়গায়।</p></div>
-          <span class="pill">{bot_state} · {int(time.time() - STARTED_AT)}s uptime</span></div>
-        <div class="quick">
-          {"".join(f'<a href="{href}"><span class="qi">{icon}</span><span><b>{esc(label)}</b>'
-                   f'<span>{esc(note)}</span></span></a>' for icon, label, href, note in ADMIN_QUICK)}
-        </div>
-        <div class="row" style="margin:0 0 18px">
-          <a class="btn grey" href="/admin/self-test">✓ Run system check</a>
-          <a class="btn grey" href="/admin/emergency">⚠ Emergency</a>
-          <a class="btn grey" href="/">↗ Public site</a>
-        </div>
-        <div class="grid">
-          {card("Users", stats['users'])} {card("Videos & files", stats['files'])}
-          {card("Stores", stats['stores'])} {card("Views", stats['views'])}
-          {card("Access granted", stats['grants'])} {card("Revenue", money(revenue['total'], settings.get_str('CURRENCY', '৳')))}
-          {card("Pending orders", revenue['pending'])} {card("Open support tickets", stats['tickets_open'])}
-        </div>
-        <p class="muted">আজ: {today} · Store ও account settings যেকোনো সময় পরিবর্তন করতে পারবেন।</p>
+        {ui.page_head("Welcome back",
+                      f"{brand} · আজ {today} — কনটেন্ট, অডিয়েন্স আর ব্রডকাস্ট সব এক জায়গায়।",
+                      eyebrow="OVERVIEW",
+                      actions=("<a class='btn' href='/admin/broadcast'>📣 নতুন ব্রডকাস্ট</a>"
+                               "<a class='btn grey' href='/admin/files'>▤ ফাইল</a>"
+                               "<a class='btn grey' href='/admin/self-test'>✓ সিস্টেম চেক</a>"
+                               "<a class='btn grey' href='/admin/emergency'>⚠ জরুরি</a>"))}
+        {bot_note}
         {reach_note}
-        <div class="page-heading"><div><p class="eyebrow">ACTIVITY</p><h2>Recent campaigns</h2></div>
-          <a class="btn grey" href="/admin/broadcast">View all</a></div>
-        <table><tr><th>#</th><th>Campaign</th><th>Audience</th><th>Status</th><th>Sent</th><th></th></tr>
-        {campaign_rows}</table>
-        """
+        {cache_warning}
+        {kpis}
+        <h3>⚡ দ্রুত কাজ</h3>
+        <div class="quick">{quick}</div>
+        <h3>📣 সর্বশেষ ব্রডকাস্ট</h3>
+        {ui.table(["#", "ক্যাম্পেইন", "অডিয়েন্স", "অবস্থা", "পাঠানো", ""],
+                  campaign_rows, empty_row="এখনো কোনো ব্রডকাস্ট নেই",
+                  numeric=(4,))}
+        {activity_block}"""
         return layout("Dashboard", body, "/admin")
 
     # ------------------------------------------------------- broadcast studio
@@ -2014,10 +2049,14 @@ def create_app() -> FastAPI:
                          'production start command হিসেবে <code>python run.py</code> ব্যবহার করুন।</div>')
         body = f"""
         {note}{warnbox}{queue_warning}
-        <h3>📢 ব্রডকাস্ট স্টুডিও</h3>
-        <p class="muted">অডিয়েন্স বাছুন, মেসেজ লিখুন (বা একটি ভিডিও/ফাইল বেছে নিন) — কিউ
-        ডেটাবেজে থাকে, তাই বট রিস্টার্ট হলেও ব্রডকাস্ট থেমে যায় না।
-        বট <b>{'🟢 অনলাইন' if bot_ready else '🔴 অফলাইন'}</b>।</p>
+        {ui.page_head("ব্রডকাস্ট স্টুডিও",
+                      "অডিয়েন্স বাছুন, মেসেজ লিখুন বা মিডিয়া দিন — কিউ ডেটাবেজে থাকে, "
+                      "তাই বট রিস্টার্ট হলেও ব্রডকাস্ট থেমে যায় না। এক মেসেজ বা "
+                      "বহু-মেসেজ — দুটোই এখান থেকে।",
+                      eyebrow="BROADCAST",
+                      actions=('<a class="btn grey" href="/admin/reel">🎞 রিল</a>'
+                               '<a class="btn grey" href="/admin/users">👥 ইউজার</a>'
+                               '<a class="btn grey" href="/admin/download">⇩ রিপোর্ট/এক্সপোর্ট</a>'))}
         <div class="card">
           <form method=post action="/admin/broadcast/new">
             <label>Audience</label>
@@ -2028,6 +2067,17 @@ def create_app() -> FastAPI:
             <select name=media_ids multiple size=5>{_media_options()}</select>
             <p class="muted">বটে <code>/bm</code> দিয়ে যেকোনো ভিডিও/ছবি ফরওয়ার্ড করলে সেটা
             এখানে আসে — স্টোরে যোগ করা লাগে না।</p>
+            <label>📤 পাঠানোর ধরন</label>
+            <select name=mode>
+              <option value="single">এক মেসেজ — টেক্সট + অ্যালবাম (আগের মতো)</option>
+              <option value="multi">বহু-মেসেজ — প্রতিটা আলাদা মেসেজ, ক্রম অনুযায়ী</option>
+            </select>
+            <p class="muted">“বহু-মেসেজ” দিলে উপরের টেক্সটটা <b>প্রথম মেসেজ</b> হয়, তারপর
+            বাছা মিডিয়াগুলো একটার পর একটা আলাদা মেসেজ হয়ে যায় (বটের <code>/br</code>
+            স্টুডিওর মতোই)। বাটন শেষ মেসেজে বসে — <code>/admin/settings</code> →
+            “বাটন কোন মেসেজে বসবে” দিয়ে বদলানো যায়।</p>
+            <label>প্রতিটা মিডিয়ার ক্যাপশন (ঐচ্ছিক — প্রতি লাইনে একটি, ক্রম অনুযায়ী)</label>
+            <textarea name=captions rows=3 placeholder="১ম মিডিয়ার ক্যাপশন&#10;২য় মিডিয়ার ক্যাপশন"></textarea>
             <label>Message (HTML allowed, <code>{{name}}</code> = user's name)</label>
             <textarea name=text rows=6 placeholder="আজকের নতুন ভিডিও এসেছে 🎬"></textarea>
             <label>ইনলাইন বাটন — প্রতি লাইনে <code>লেবেল | লিংক</code>
@@ -2065,6 +2115,7 @@ def create_app() -> FastAPI:
                             action: str = Form("start"), buttons: str = Form(""),
                             online: str = Form(""),
                             slow_minutes: float = Form(0),
+                            mode: str = Form("single"), captions: str = Form(""),
                             media_ids: list[int] = Form(default=[])):
         blocked = _guard(request)
         if blocked:
@@ -2089,16 +2140,51 @@ def create_app() -> FastAPI:
         if not targets:
             return RedirectResponse("/admin/broadcast?warn=এই+অডিয়েন্সে+কেউ+নেই", status_code=303)
         owner = cfg.ADMIN_IDS[0] if cfg.ADMIN_IDS else 0
+        # “বহু-মেসেজ” mode: the text becomes message #1 and every chosen media item
+        # becomes its own message (the same model as the bot's `/br` studio and the
+        # standalone broadcast bot). Captions line up with the media, in order.
+        draft_items: list[dict] = []
+        if (mode or "").strip().lower() == "multi":
+            if body:
+                draft_items.append({"kind": "text", "text": body})
+            caption_lines = [line.strip() for line in (captions or "").splitlines()]
+            # The single "attach a file" select is a message of its own in this mode,
+            # otherwise a store file would be silently dropped.
+            for file_row in files:
+                row = db.file(int(file_row)) or {}
+                draft_items.append({
+                    "kind": (row.get("kind") or "document").lower(),
+                    "file_id": int(file_row),
+                    "text": caption_lines[0] if caption_lines else "",
+                    "name": row.get("name") or "",
+                })
+            for index, item in enumerate(media):
+                at = index + (1 if files else 0)
+                draft_items.append({
+                    "kind": (item.get("kind") or "video"),
+                    "media_key": f"{int(item.get('chat_id') or 0)}:{int(item.get('msg_id') or 0)}",
+                    "text": caption_lines[at] if at < len(caption_lines) else "",
+                    "name": item.get("name") or "",
+                })
+            if not draft_items:
+                return RedirectResponse(
+                    "/admin/broadcast?warn=বহু-মেসেজ+মোডে+অন্তত+একটা+মেসেজ+বা+মিডিয়া+দিন",
+                    status_code=303)
         # Tests and drafts are always non-sendable until an admin explicitly starts them.
         # Slow mode: spread the audience over N minutes (Telegram's own advice for
         # big lists — the global ceiling is ~30 messages/second).
         pause = (quickcast_service.slow_pause(len(targets), slow_minutes)
                  if slow_minutes and slow_minutes > 0 else 0.0)
-        campaign = broadcast.create_campaign(owner, text=body, audience=audience,
-                                            files=files, start=(action == "start"),
-                                            buttons=buttons, media=media,
-                                            origin="panel", pause_seconds=pause,
-                                            online_button=1 if online else 0)
+        campaign = broadcast.create_campaign(
+            owner, text=body if not draft_items else "", audience=audience,
+            files=files if not draft_items else [], start=(action == "start"),
+            buttons=buttons, media=media if not draft_items else [],
+            origin="panel", pause_seconds=pause,
+            online_button=1 if online else 0,
+            title=((re.sub(r"<[^>]+>", "", body).strip().splitlines() or [""])[0][:40]
+                   if draft_items else ""))
+        if draft_items:
+            db.set_campaign_groups(campaign["id"], draft_items)
         campaign_id = campaign["id"]
         if action == "test":
             if not cfg.ADMIN_IDS:
@@ -2180,12 +2266,44 @@ def create_app() -> FastAPI:
                f"<p class='muted'>একই কারণে আটকে থাকা সবাইকে এক ক্লিকে আবার পাঠাতে "
                f"🔁 Retry failed চাপুন। ইউজার বটকে ব্লক করলে সেটা টেলিগ্রামের নিয়ম — "
                f"শুধু বট-ই মেসেজ পাঠাতে পারে না, কোনো উপায় নেই।</p></div>") if reasons else ""
+        # Multi-message drafts (ported from `broadcast.py`): the campaign is a list
+        # of messages, so show that list — what goes out, in which order.
+        plan = db.campaign_groups(campaign_id)
+        items_preview = ""
+        if plan:
+            kind_icon = {"text": "💬", "photo": "🖼", "video": "🎬", "animation": "🎞",
+                         "document": "📄", "audio": "🎵", "voice": "🎤"}
+            rows = "".join(
+                f"<tr><td class='muted'>{index}</td>"
+                f"<td>{kind_icon.get(row.get('kind') or 'text', '📦')} "
+                f"{esc(row.get('kind') or 'text')}</td>"
+                f"<td>{esc(re.sub(r'<[^>]+>', '', row.get('text') or '')[:160]) or '<span class=muted>—</span>'}</td>"
+                f"<td class='muted'>{esc(row.get('media_key') or '')}</td></tr>"
+                for index, row in enumerate(plan, start=1))
+            items_preview = (f'<div class="card"><h4>🧵 বহু-মেসেজ খসড়া — {len(plan)}টি '
+                             f'আলাদা মেসেজ (এই ক্রমেই যাবে)</h4>'
+                             f'<table><tr><th>#</th><th>ধরন</th><th>টেক্সট/ক্যাপশন</th>'
+                             f'<th>মিডিয়া সোর্স</th></tr>{rows}</table></div>')
         attached = db.campaign_media(campaign_id)
         media_preview = ""
         if attached:
             tiles = "".join(_campaign_media_tile(item) for item in attached)
             media_preview = (f'<div class="card"><h4>সংযুক্ত মিডিয়া ({len(attached)}টি) — '
                              f'একসাথে অ্যালবাম হয়ে যাবে</h4><div class="wall">{tiles}</div></div>')
+        # The share link used to be shown once, in a flash message, and then lost.
+        # Keep it on the page (and easy to copy) for as long as it exists.
+        share_tokens = db.campaign_links(campaign_id, kind="draft")
+        share_card = ""
+        if share_tokens:
+            links = "".join(
+                f"<li><code>/draft/{esc(row['token'])}</code> — "
+                f"{int(row.get('clicks') or 0)} বার খোলা হয়েছে "
+                f"<a class='btn grey' href='/draft/{esc(row['token'])}' target='_blank'>↗ খুলুন</a></li>"
+                for row in share_tokens)
+            share_card = (f"<div class='card'><h4>🔗 খসড়ার পাবলিক লিংক "
+                          f"({len(share_tokens)}টি)</h4><ul class='share-links'>{links}</ul>"
+                          f"<p class='muted'>লিংকটা যে কেউ খুলতে পারে — শুধু পড়ার জন্য, "
+                          f"কোনো অ্যাডমিন তথ্য বা বাটন সেখানে যায় না।</p></div>")
         missing_media = [fid for fid in (campaign.get("file_ids") or [])
                          if not (db.file(fid) or {}).get("mirror_msg")]
         cache_warn = (f"<div class='warnbox'>🎞 {len(missing_media)} টি ফাইলের বট-কপি এখনো "
@@ -2205,6 +2323,8 @@ def create_app() -> FastAPI:
         <p class="muted">Audience: {esc(broadcast.audience_label(campaign['audience']))} ·
         Created {_start(campaign['created_at'])} ·
         Started {_start(campaign['started_at'])} · Finished {_start(campaign['finished_at'])}</p>
+        {items_preview}
+        {share_card}
         <div class="card"><h4>প্রিভিউ</h4><div>{broadcast.preview(campaign) or '<span class=muted>— (শুধু ফাইল) —</span>'}</div></div>
         {media_preview}
         <div class="row" style="margin:14px 0">
@@ -2212,6 +2332,8 @@ def create_app() -> FastAPI:
           <form method=post action="/admin/broadcast/{campaign_id}/cancel"><button class="bad">⏹ Stop</button></form>
           <form method=post action="/admin/broadcast/{campaign_id}/retry"><button class="warn">🔁 Retry failed</button></form>
           <form method=post action="/admin/broadcast/{campaign_id}/test"><button class="grey">🧪 Test to me</button></form>
+          <a class="btn grey" href="/admin/broadcast/{campaign_id}/report.csv">📊 রিপোর্ট CSV</a>
+          <form method=post action="/admin/broadcast/{campaign_id}/share"><button class="grey">🔗 খসড়ার লিংক</button></form>
           <form method=post action="/admin/broadcast/{campaign_id}/delete"><button class="bad">🗑 Delete</button></form>
         </div>
         {cache_warn}{why}
@@ -2254,6 +2376,67 @@ def create_app() -> FastAPI:
         </script>
         """
         return layout(f"Campaign {campaign_id}", body, "/admin/broadcast")
+
+    @app.get("/admin/broadcast/{campaign_id}/report.csv")
+    async def admin_campaign_report(request: Request, campaign_id: int):
+        """Who received the broadcast and who did not — the archive's `/send` CSV."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        campaign = db.campaign(campaign_id)
+        if campaign is None:
+            return RedirectResponse("/admin/broadcast?warn=ক্যাম্পেইন+নেই", status_code=303)
+        data, _summary = broadcast.report_bytes(campaign_id)
+        headers = {"Content-Disposition": f'attachment; filename="{broadcast.report_filename(campaign_id)}"'}
+        return Response(content=data, media_type="text/csv; charset=utf-8", headers=headers)
+
+    @app.post("/admin/broadcast/{campaign_id}/share")
+    async def admin_campaign_share(request: Request, campaign_id: int):
+        """Give the draft a public link someone else can open (nothing gets sent)."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        campaign = db.campaign(campaign_id)
+        if campaign is None:
+            return RedirectResponse("/admin/broadcast?warn=ক্যাম্পেইন+নেই", status_code=303)
+        token = quickcast_service.share_draft(campaign_id)
+        audit_service.record("draft_shared", ref=str(campaign_id), detail=token)
+        return RedirectResponse(f"/admin/broadcast/{campaign_id}?flash=🔗+লিংক+তৈরি:+draft/{token}",
+                                status_code=303)
+
+    @app.get("/draft/{token}", response_class=HTMLResponse)
+    async def public_draft(token: str):
+        """A read-only look at a draft — for a colleague, before anything is sent."""
+        campaign = db.campaign_by_link(token)
+        if campaign is None:
+            return layout("খসড়া নেই", "<h2>🔍 এই খসড়ার লিংক আর কাজ করে না</h2>"
+                                      "<p class='muted'>সম্ভবত মুছে ফেলা হয়েছে।</p>", "/")
+        db.hit_campaign_link(token)
+        plan = db.campaign_groups(int(campaign["id"]))
+        if not plan:
+            plan = [{"kind": "text", "text": campaign.get("text") or ""}]
+        kind_icon = {"text": "💬", "photo": "🖼", "video": "🎬", "animation": "🎞",
+                     "document": "📄", "audio": "🎵", "voice": "🎤"}
+        tiles = "".join(
+            f'<div class="card"><div class="muted">{index} · '
+            f'{kind_icon.get(row.get("kind") or "text", "📦")} {esc(row.get("kind") or "text")}'
+            f'</div><div style="margin-top:8px">{body or "<span class=muted>—</span>"}</div></div>'
+            for index, row in enumerate(plan, start=1)
+            for body in [(row.get("text") or "").replace("\n", "<br>")])
+        buttons = db.campaign_links(int(campaign["id"]), kind="button")
+        button_html = ""
+        if buttons:
+            button_html = ('<p class="row">' + "".join(
+                f'<a class="btn grey" href="{esc(row["url"])}" rel="noopener" '
+                f'target="_blank">{esc(row["label"])}</a>' for row in buttons) + "</p>")
+        body = f"""
+        <div class="page-heading"><div><p class="eyebrow">DRAFT PREVIEW</p>
+          <h2>👀 খসড়া — {esc(campaign.get('title') or 'ব্রডকাস্ট')}</h2></div></div>
+        <p class="muted">এটা শুধু দেখার জন্য — এখান থেকে কিছু পাঠানো যায় না। মালিক
+        অ্যাডমিন প্যানেল বা বট থেকে অনুমোদন দিলে পাঠানো হবে।</p>
+        {tiles}
+        {button_html}"""
+        return layout("খসড়া", body, "/")
 
     @app.post("/admin/broadcast/{campaign_id}/start")
     async def studio_start(request: Request, campaign_id: int):
@@ -2319,6 +2502,8 @@ def create_app() -> FastAPI:
             note = f"🔁+{rearmed}+টি+ফেইল,+{pending}+টি+pending+কিউতে+চালু"
         else:
             note = f"🔁+{rearmed}+টি+ফেইল,+{pending}+টি+pending+কিউতে;+বট+অনলাইন+হলে+শুরু+হবে"
+        audit_service.record("broadcast_retry", ref=str(campaign_id),
+                             detail=f"rearmed={rearmed} pending={pending}")
         return RedirectResponse(
             f"/admin/broadcast/{campaign_id}?flash={note}", status_code=303)
 
@@ -2332,6 +2517,9 @@ def create_app() -> FastAPI:
                 f"/admin/broadcast/{campaign_id}?warn=ADMIN_IDS+সেট+নেই", status_code=303)
         result = await broadcast.test_send(campaign_id, [cfg.ADMIN_IDS[0]])
         message = "🧪+টেস্ট+পাঠানো+হয়েছে" if result.get("ok") else "❌+টেস্ট+পাঠানো+যায়নি"
+        audit_service.record("broadcast_test", ref=str(campaign_id),
+                             detail="ok" if result.get("ok") else
+                                    str((result.get("errors") or ["failed"])[0]))
         return RedirectResponse(f"/admin/broadcast/{campaign_id}?flash={message}", status_code=303)
 
     @app.post("/admin/broadcast/{campaign_id}/delete")
@@ -2339,7 +2527,10 @@ def create_app() -> FastAPI:
         blocked = _guard(request)
         if blocked:
             return blocked
+        row = db.campaign(campaign_id) or {}
         db.delete_campaign(campaign_id)
+        audit_service.record("broadcast_deleted", ref=str(campaign_id),
+                             detail=(row.get("title") or "")[:80])
         return RedirectResponse("/admin/broadcast?flash=🗑+মুছে+ফেলা+হয়েছে", status_code=303)
 
     @app.get("/admin/api/campaign/{campaign_id}")
@@ -2924,7 +3115,13 @@ def create_app() -> FastAPI:
             checked = " checked" if value else ""
             return (f'<label class="chk"><input type="checkbox" name="{name}" '
                     f'value="1"{checked}> {esc(item.label)}</label>')
-        if item.kind == "long":
+        if item.kind == "choice":
+            options = "".join(
+                f'<option value="{esc(choice)}"'
+                f'{" selected" if str(value) == str(choice) else ""}>{esc(choice)}</option>'
+                for choice in (item.choices or ()))
+            inner = f'<select name="{name}">{options}</select>'
+        elif item.kind == "long":
             inner = (f'<textarea name="{name}" rows="3" placeholder="{esc(item.placeholder)}">'
                      f'{esc(value)}</textarea>')
         else:

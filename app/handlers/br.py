@@ -33,6 +33,7 @@ from app.handlers.router import route
 from app.handlers.state import ask, peek, take
 from app.services import access, broadcast, quickcast
 from app.services.quickcast import Content
+from app.utils import esc
 
 SESSION_TTL = 3600                        # a forgotten studio closes after an hour
 sessions: dict[int, float] = {}           # admin_id -> last activity
@@ -171,7 +172,8 @@ async def br_start(event) -> None:
 @bot.on(events.NewMessage(func=_is_admin_private,
                           pattern=r"(?i)^/br(send|test|preview|status|clear|cancel|help|"
                                   r"audience|silent|protect|schedule|queue|who|why|retry|"
-                                  r"cancelqueue|slow)(@\w+)?(\s+[\s\S]*)?$"))
+                                  r"cancelqueue|slow|items|drop|csv|report|share)"
+                                  r"(@\w+)?(\s+[\s\S]*)?$"))
 async def br_command(event) -> None:
     admin_id = event.sender_id
     command = (event.pattern_match.group(1) or "").lower()
@@ -196,9 +198,17 @@ async def br_command(event) -> None:
             "<code>/brretry</code> — শেষ ক্যাম্পেইনের ব্যর্থদের আবার পাঠান\n"
             "<code>/brqueue</code> — শিডিউল করা / অপেক্ষায় থাকা ব্রডকাস্ট\n"
             "<code>/brcancelqueue 12</code> — অপেক্ষায় থাকা #১২ বাতিল\n"
+            "<code>/britems</code> — খসড়ার সব মেসেজ এক নজরে (ক্রম সহ)\n"
+            "<code>/brdrop</code> — শেষ যোগ করা মেসেজটা বাদ দিন\n"
+            "<code>/brcsv</code> — কে পেয়েছে/পায়নি তার CSV রিপোর্ট\n"
+            "<code>/brshare</code> — খসড়ার শেয়ার লিংক\n"
             "<code>/brclear</code> — খসড়া মুছুন · <code>/brcancel</code> — বন্ধ করুন\n\n"
-            "টিপস: একসাথে ১০টা পর্যন্ত ভিডিও/ছবি দিলে অ্যালবাম হয়ে যায়; "
-            "বাটন অটো-যুক্ত করতে <code>নাম | লিংক</code> লাইনে লাইনে পাঠান।")
+            "<b>বহু-মেসেজ ব্রডকাস্ট (এই স্টুডিওর নতুন ক্ষমতা):</b> স্টুডিও খোলা থাকলে যা খুশি "
+            "পাঠাতে থাকুন — টেক্সট, ছবি, ভিডিও, GIF, ফাইল, অডিও, ভয়েস। প্রতিটা আলাদা "
+            "মেসেজ হিসেবে <b>এই ক্রমেই</b> সব ইউজারের কাছে যাবে (➕ Added #ন)। "
+            "বাটন বসে শেষ মেসেজে (<code>/admin/settings</code>-এ “প্রতিটি মেসেজে”ও করা যায়)।\n"
+            "একসাথে ১০টা পর্যন্ত ভিডিও/ছবি দিলে অ্যালবামও হয়ে যায়; "
+            "বাটন: <code>নাম | লিংক</code> লাইনে লাইনে।")
         raise events.StopPropagation
 
     if command == "clear":
@@ -290,6 +300,67 @@ async def br_command(event) -> None:
         await _cancel_queued(event, rest)
         raise events.StopPropagation
 
+    if command == "items":
+        lines = quickcast.item_lines(content)
+        if not lines:
+            await event.respond(
+                "📭 এখনো কিছু যোগ করা হয়নি। স্টুডিও খোলা থাকলে যা খুশি পাঠান — "
+                "টেক্সট, ছবি, ভিডিও, GIF, ফাইল, অডিও, ভয়েস — প্রতিটা আলাদা মেসেজ হয়ে যাবে।\n\n"
+                "যেমন:\n1️⃣ প্রথম মেসেজ লিখুন\n2️⃣ তারপর ভিডিও দিন\n3️⃣ শেষে বাটন: "
+                "<code>নাম | লিংক</code>\nতারপর <code>/brsend</code>",
+                buttons=_keyboard(content, admin_id))
+            raise events.StopPropagation
+        await event.respond("📋 <b>খসড়ার মেসেজগুলো (এই ক্রমেই যাবে)</b>\n\n"
+                            + "\n".join(lines)
+                            + f"\n\n<b>মোট {len(content.items)}টি মেসেজ</b> — "
+                              "<code>/brdrop</code> দিয়ে শেষটা বাদ দিন, "
+                              "<code>/brsend</code> দিয়ে পাঠান।",
+                            buttons=_keyboard(content, admin_id))
+        raise events.StopPropagation
+
+    if command == "drop":
+        dropped = quickcast.drop_item(content)
+        quickcast.save_draft(admin_id, content)
+        if dropped is None:
+            await event.respond("বাদ দেওয়ার মতো কিছু নেই।")
+        else:
+            await event.respond(f"🗑 <b>{dropped.kind}</b> বাদ দেওয়া হলো — এখন বাকি "
+                                f"<b>{len(content.items)}</b>টি মেসেজ।",
+                                buttons=_keyboard(content, admin_id))
+        raise events.StopPropagation
+
+    if command in ("csv", "report"):
+        campaign_id = _last_campaign_id(rest)
+        if not campaign_id:
+            await event.respond("কোনো ক্যাম্পেইন পাওয়া যায়নি — আগে <code>/brsend</code> করুন।")
+            raise events.StopPropagation
+        from app.services import broadcast
+        outcome = await broadcast.send_report(admin_id, campaign_id)
+        if not outcome.get("delivered"):
+            await event.respond("❌ রিপোর্ট পাঠানো গেল না: "
+                                f"<code>{esc(str(outcome.get('error') or 'unknown'))}</code>")
+        else:
+            lines = broadcast.failure_lines(campaign_id, limit=8)
+            if lines:
+                await event.respond("❌ <b>যারা পায়নি</b>\n" + "\n".join(lines))
+        raise events.StopPropagation
+
+    if command == "share":
+        campaign_id = _last_campaign_id(rest)
+        if not campaign_id:
+            newest = db.campaigns(limit=1)
+            campaign_id = int(newest[0]["id"]) if newest else 0
+        token = quickcast.share_draft(campaign_id) if campaign_id else 0
+        if not token:
+            await event.respond("🔗 শেয়ার লিংক বানাতে আগে একটা খসড়া সেভ করুন "
+                                "(<code>/brsend</code> বা প্যানেল থেকে খসড়া রাখুন)।")
+            raise events.StopPropagation
+        from app.services.basepath import link as base_link
+        url = base_link(f"draft/{token}")
+        await event.respond(f"🔗 <b>খসড়ার লিংক</b> — যে কেউ দেখতে পারবে (পাঠানো যাবে না):\n"
+                            f"<code>{esc(url)}</code>")
+        raise events.StopPropagation
+
     if command in ("send", "test"):
         await _send(event, content, admin_id, test=(command == "test"))
         raise events.StopPropagation
@@ -297,7 +368,12 @@ async def br_command(event) -> None:
 
 @bot.on(events.NewMessage(func=lambda e: _is_admin_private(e) and _open(e.sender_id)))
 async def br_collect(event) -> None:
-    """Everything the admin drops while the studio is open: media, text, buttons."""
+    """Everything the admin drops while the studio is open: media, text, buttons.
+
+    Ported from the standalone `broadcast.py`: *any* message becomes one item of the
+    draft — text, photo, video, GIF, file, audio, voice — and each item is later sent
+    as its own Telegram message, in the same order (“➕ Added #3” there, here too).
+    """
     admin_id = event.sender_id
     text = (event.raw_text or "").strip()
     if text.startswith("/"):
@@ -305,21 +381,22 @@ async def br_collect(event) -> None:
     _touch(admin_id)
     content = quickcast.load_draft(admin_id) or Content()
 
-    item = quickcast.add_media(content, event.message)
-    if item is not None:
+    # `নাম | লিংক` lines are buttons, not content (kept from the studio flow).
+    if text and quickcast.looks_like_buttons(text):
+        what = quickcast.add_text(content, text, event.message.entities)
         quickcast.save_draft(admin_id, content)
-        if text:
-            quickcast.add_text(content, text, event.message.entities)
-            quickcast.save_draft(admin_id, content)
-        await event.respond(f"🖼 মিডিয়া যোগ হলো ({len(content.media)}/{quickcast.MAX_MEDIA})",
+        await event.respond("🔗 বাটন যোগ হলো — " + content.summary(),
                             buttons=_keyboard(content, admin_id))
         raise events.StopPropagation
 
-    if text:
-        what = quickcast.add_text(content, text, event.message.entities)
-        quickcast.save_draft(admin_id, content)
-        note = "🔗 বাটন যোগ হলো" if what == "buttons" else "✍️ টেক্সট সেট হলো"
-        await event.respond(f"{note} — {content.summary()}",
+    item = quickcast.add_item(content, event.message, text=text,
+                              entities=getattr(event.message, "entities", None))
+    quickcast.save_draft(admin_id, content)
+    if item is not None:
+        note = f"➕ যোগ হলো #{len(content.items)} — {item.icon()} <b>{item.kind}</b>"
+        if item.kind == "text":
+            note += " (আলাদা মেসেজ হিসেবে যাবে)"
+        await event.respond(f"{note}\n{content.summary()}",
                             buttons=_keyboard(content, admin_id))
         raise events.StopPropagation
     raise events.StopPropagation

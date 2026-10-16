@@ -56,6 +56,11 @@ class Delivery:
     detail: str = ""
 
 
+#: Small breather between the messages of one multi-item draft (the archive used
+#: `asyncio.sleep(0.05)` for the same reason: ~20 messages/second stays under
+#: Telegram's limit even when a whole list goes to one person).
+DRAFT_ITEM_GAP = 0.05
+
 # (chat, message) -> (expires_at, message): the mirrored copy is read once per few minutes,
 # not once per recipient - this is what makes a broadcast fast.
 _SOURCE_CACHE: dict[tuple[int, int], tuple[float, object]] = {}
@@ -308,6 +313,90 @@ async def _try_jit(file_row: dict, chat_id: int, caption_text: str, buttons=None
     except Exception as exc:
         log.warning("JIT delivery failed for file %s: %s", file_row["id"], exc)
         return Delivery(False, ERROR, str(exc)[:200])
+
+
+# ------------------------------------------------------ multi-message drafts
+# Ported from the standalone `broadcast.py`: a draft is a *list* of items and every
+# item becomes its own Telegram message (the archive's `send_draft(chat_id, draft)`).
+def split_media_key(media_key: str) -> tuple[int, int]:
+    """`"-1001234:7"` → `(-1001234, 7)`. Handles the leading minus of a chat id."""
+    text = str(media_key or "")
+    if ":" not in text:
+        return 0, 0
+    chat, _, msg = text.rpartition(":")
+    try:
+        return int(chat), int(msg)
+    except ValueError:
+        return 0, 0
+
+
+async def send_draft_item(chat_id, item: dict, *, buttons=None, silent: bool = False,
+                          protect: bool = True, allow_buttons: bool = True) -> bool:
+    """Send one item of a multi-message draft. Returns True when it was delivered.
+
+    * `{"kind": "text", "text": …}` → a plain message (typed HTML is preserved),
+    * `{"kind": "video", "media_key": "chat:msg", "text": …}` → that media with the
+      item's own text as its caption,
+    * `{"kind": "photo", "file_id": 12, …}` → a store file chosen in the panel.
+    """
+    kind = str(item.get("kind") or "text")
+    text = item.get("text") or ""
+    if kind == "text":
+        if not (text or "").strip():
+            return False
+        message = await safe_call(bot.send_message, chat_id, text,
+                                  buttons=(buttons if allow_buttons else None),
+                                  link_preview=False, silent=bool(silent),
+                                  what="draft_text", retries=2)
+        if message is None:
+            raise RuntimeError("draft text send returned nothing")
+        return True
+
+    file_id = int(item.get("file_id") or 0)
+    if file_id:
+        result = await deliver_file_id(chat_id, file_id, text,
+                                       buttons=buttons if allow_buttons else None)
+        if not result.ok:
+            raise RuntimeError(f"file {file_id}: {result.reason}: {result.detail}")
+        return True
+
+    chat, msg_id = split_media_key(str(item.get("media_key") or ""))
+    source = await source_message(chat, msg_id)
+    if source is None:
+        raise RuntimeError(f"media unavailable: {item.get('media_key')} "
+                           "(could not re-read the original message)")
+    await send_source_media(chat_id, source, text,
+                            buttons=buttons if allow_buttons else None,
+                            silent=bool(silent), protect=bool(protect))
+    return True
+
+
+async def send_draft(chat_id, items: list[dict], *, buttons=None, silent: bool = False,
+                     protect: bool = True, buttons_on: str = "last") -> int:
+    """Send a whole multi-message draft, in order. Returns how many messages went out.
+
+    `buttons_on` follows the archive: `"last"` puts the inline keyboard on the final
+    message only (there it was `d["kb"] if i == last else None`), `"each"` puts it on
+    every message, `"none"` sends no keyboard (a follow-up note carries the links).
+    """
+    sent = 0
+    last = len(items) - 1
+    for index, item in enumerate(items):
+        allow = buttons_on == "each" or (buttons_on == "last" and index == last)
+        try:
+            if await send_draft_item(chat_id, item, buttons=buttons, silent=silent,
+                                     protect=protect, allow_buttons=allow):
+                sent += 1
+        except FloodWaitError:
+            raise
+        except Exception as exc:
+            log.warning("draft item %s/%s to %s failed: %s", index + 1, len(items),
+                        chat_id, exc)
+            if sent == 0:
+                raise                                   # nothing arrived: report it
+            break                                       # partial: keep what arrived
+        await asyncio.sleep(DRAFT_ITEM_GAP)             # stay polite between messages
+    return sent
 
 
 async def send_text(chat_id: int, text: str, buttons=None, link_preview: bool = False):

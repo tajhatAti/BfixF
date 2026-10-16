@@ -290,6 +290,34 @@ CREATE TABLE IF NOT EXISTS campaign_items (
 CREATE INDEX IF NOT EXISTS idx_camp_status ON campaigns(status, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_camp_items  ON campaign_items(campaign_id, status);
 
+-- v3.4: a broadcast is not always one message. Every item an admin sent while
+-- drafting (text, photo, video, GIF, document, audio, voice) is one row here and
+-- goes out as its own message — exactly like the original draft.
+CREATE TABLE IF NOT EXISTS campaign_groups (
+    campaign_id INTEGER NOT NULL,
+    idx         INTEGER NOT NULL,
+    kind        TEXT,
+    file_id     TEXT,
+    text        TEXT,
+    media_key   TEXT,
+    parse_mode  TEXT DEFAULT '',
+    created_at  REAL,
+    PRIMARY KEY (campaign_id, idx)
+);
+-- v3.4: reusable “label | url” buttons + a public draft link for each campaign.
+CREATE TABLE IF NOT EXISTS campaign_links (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id INTEGER,
+    token       TEXT UNIQUE,
+    label       TEXT,
+    url         TEXT,
+    kind        TEXT DEFAULT 'button',
+    clicks      INTEGER DEFAULT 0,
+    created_at  REAL
+);
+CREATE INDEX IF NOT EXISTS idx_camp_links ON campaign_links(campaign_id, kind);
+CREATE INDEX IF NOT EXISTS idx_camp_groups ON campaign_groups(campaign_id, idx);
+
 -- ===================== v3: analytics, limited links, per-store force join =====================
 CREATE TABLE IF NOT EXISTS events (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -475,6 +503,13 @@ class Database:
             # (Telegram allows ~30 messages/second in total).
             ("campaigns", "pause_seconds",
              "ALTER TABLE campaigns ADD COLUMN pause_seconds REAL DEFAULT 0"),
+            # -------------------------------------------- v3.4 media-group drafts
+            # The `/br` studio can draft several items (text, photo, video, GIF,
+            # file, audio, voice — one admin message each) and send them exactly
+            # like that. `campaign_groups` keeps that list; `items` (below) keeps
+            # an older single-file list alive for existing campaigns.
+            ("campaign_items", "draft_id",
+             "ALTER TABLE campaign_items ADD COLUMN draft_id INTEGER DEFAULT 0"),
         ):
             columns = {row["name"] for row in
                        self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -675,6 +710,30 @@ class Database:
 
     def user_count(self) -> int:
         return self._one("SELECT COUNT(*) AS c FROM users")["c"]
+
+    def all_users_brief(self) -> list[dict]:
+        """`user_id, username, name` for everybody — used by broadcast reports.
+
+        A report lists thousands of rows; returning just these three columns keeps
+        it cheap instead of loading every user record with all its settings.
+        """
+        return [dict(r) for r in self._q(
+            "SELECT user_id, COALESCE(username, '') AS username, COALESCE(name, '') AS name"
+            " FROM users ORDER BY user_id")]
+
+    def users_brief(self, user_ids: Iterable[int]) -> dict[int, dict]:
+        """The same, but only for the given ids (a report often needs a fraction)."""
+        wanted = [int(uid) for uid in dict.fromkeys(user_ids) if uid]
+        out: dict[int, dict] = {}
+        for start in range(0, len(wanted), 400):          # stay under SQLite's limit
+            chunk = wanted[start:start + 400]
+            marks = ",".join("?" for _ in chunk)
+            for row in self._q(
+                    f"SELECT user_id, COALESCE(username, '') AS username,"
+                    f" COALESCE(name, '') AS name FROM users WHERE user_id IN ({marks})",
+                    tuple(chunk)):
+                out[int(row["user_id"])] = dict(row)
+        return out
 
     # ------------------------------------------------------------ admin state
     def active_store_id(self, admin_id: int) -> int | None:
@@ -2050,6 +2109,78 @@ class Database:
         return [dict(r) for r in self._q(
             "SELECT * FROM campaign_media WHERE campaign_id = ? ORDER BY idx",
             (int(campaign_id),))]
+
+    # ------------------------------------------------- multi-item draft groups
+    # Ported from the standalone `broadcast.py` archive: a draft is a *list* of
+    # messages („➕ Added #3“). Storing the list makes `/send` reproduce the draft
+    # exactly — several media in one go instead of only one file per campaign.
+    def set_campaign_groups(self, campaign_id: int, items: list[dict]) -> int:
+        """Replace the draft list of a campaign (ordered, 1-based idx)."""
+        self._run("DELETE FROM campaign_groups WHERE campaign_id = ?", (int(campaign_id),))
+        now = time.time()
+        added = 0
+        for idx, item in enumerate(items or []):
+            if not item:
+                continue
+            kind = str(item.get("kind") or "text")[:16]
+            text = item.get("text") or ""
+            file_id = item.get("file_id") or ""
+            media_key = str(item.get("media_key") or "")
+            # A media item may carry no caption at all — the pointer is the content,
+            # so “no text and no file id” is not an empty item when media_key is set.
+            if not text and not file_id and not media_key:
+                continue
+            self._run(
+                "INSERT OR REPLACE INTO campaign_groups"
+                "(campaign_id, idx, kind, file_id, text, media_key, parse_mode, created_at)"
+                " VALUES(?,?,?,?,?,?,?,?)",
+                (int(campaign_id), int(item.get("idx", idx)), kind, str(file_id),
+                 text, media_key, str(item.get("parse_mode") or ""), now),
+            )
+            added += 1
+        return added
+
+    def campaign_groups(self, campaign_id: int) -> list[dict]:
+        return [dict(r) for r in self._q(
+            "SELECT * FROM campaign_groups WHERE campaign_id = ? ORDER BY idx",
+            (int(campaign_id),))]
+
+    def count_campaign_groups(self, campaign_id: int) -> int:
+        row = self._one("SELECT COUNT(*) AS n FROM campaign_groups WHERE campaign_id = ?",
+                        (int(campaign_id),))
+        return int(row["n"] if row else 0)
+
+    # ------------------------------------------------ rich draft links (buttons)
+    def add_campaign_link(self, campaign_id: int, token: str, *, label: str = "",
+                          url: str = "", kind: str = "button") -> int:
+        cur = self._run(
+            "INSERT OR REPLACE INTO campaign_links(campaign_id, token, label, url, kind,"
+            " clicks, created_at) VALUES(?,?,?,?,?, COALESCE((SELECT clicks FROM"
+            " campaign_links WHERE token = ?), 0), ?)",
+            (int(campaign_id), token, label or "", url or "", kind or "button", token,
+             time.time()),
+        )
+        return int(cur.lastrowid or 0)
+
+    def campaign_links(self, campaign_id: int, kind: str | None = "button") -> list[dict]:
+        sql = "SELECT * FROM campaign_links WHERE campaign_id = ?"
+        params: list[Any] = [int(campaign_id)]
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        sql += " ORDER BY id"
+        return [dict(r) for r in self._q(sql, params)]
+
+    def campaign_by_link(self, token: str) -> dict | None:
+        row = self._one("SELECT * FROM campaign_links WHERE token = ?", (str(token),))
+        if row is None:
+            return None
+        return self.campaign(int(row["campaign_id"]))
+
+    def hit_campaign_link(self, token: str) -> int:
+        self._run("UPDATE campaign_links SET clicks = clicks + 1 WHERE token = ?", (str(token),))
+        row = self._one("SELECT clicks FROM campaign_links WHERE token = ?", (str(token),))
+        return int(row["clicks"] if row else 0)
 
     def clear_campaign_media(self, campaign_id: int) -> None:
         self._run("DELETE FROM campaign_media WHERE campaign_id = ?", (int(campaign_id),))

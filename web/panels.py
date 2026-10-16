@@ -11,6 +11,7 @@ from app import config as cfg, runtime
 from app.services import channels, forcejoin, settings
 from app.storage import db
 from app.utils import esc, fmt_ts
+from web import adminui as ui
 
 
 def _start(ts) -> str:
@@ -23,6 +24,7 @@ def _pill(text: str) -> str:
 
 # ------------------------------------------------------------------- channels
 def channels_body(flash: str = "", warn: str = "") -> str:
+    """📡 Every channel the bot talks to: force-join gates and per-store caches."""
     rows = []
     for row in db.join_channels():
         scope = "🌍 সব স্টোরে" if row.get("store_id") is None else f"🏪 স্টোর #{row['store_id']}"
@@ -198,7 +200,17 @@ def analytics_body(days: int = 14) -> str:
         f"<td>{esc(e.get('file_name') or '—')}</td><td>{esc((e.get('detail') or '')[:60])}</td></tr>"
         for e in db.events(limit=60))
 
-    return f"""<h3>📊 অ্যানালিটিক্স</h3>
+    return ui.page_head(
+        "অ্যানালিটিক্স",
+        f"শেষ {days} দিনের ছবি — কে এসেছে, কী দেখেছে, কী কিনেছে। "
+        "সংখ্যাগুলো লাইভ ডেটাবেস থেকে আসে।",
+        eyebrow="ANALYTICS",
+        actions='<div class="row">'
+                + "".join(f'<a class="btn {"grey" if d != days else ""}" '
+                          f'href="/admin/analytics?days={d}">{d} দিন</a>'
+                          for d in (7, 14, 30, 90))
+                + f'<a class="btn grey" href="/admin/download">⇩ এক্সপোর্ট</a></div>'
+    ) + f"""
     <div class="grid">
       {_card("ইউজার", users)}{_card("ফাইল", files)}{_card("ক্যাশড", mirrored)}
       {_card("লিংক", links)}{_card("স্টোর", len(stores))}
@@ -660,30 +672,31 @@ def audit_body(name: str = "", days: int = 30) -> str:
     chips = "".join(
         f"<span class='pill'>{esc(audit.label(key))} <b>{count}</b></span>"
         for key, count in tally[:8])
-    body = "".join(
-        f"<tr><td class='muted'>{fmt_ts(row.get('ts'), '%d %b %H:%M') if row.get('ts') else '—'}</td>"
-        f"<td>{esc(audit.label(row.get('name')))}</td>"
-        f"<td>{esc(str(row.get('user_name') or row.get('user_id') or '—'))}</td>"
-        f"<td>{esc(str(row.get('store_name') or ''))}</td>"
-        f"<td>{esc(str(row.get('ref') or ''))}</td>"
-        f"<td class='muted'>{esc(str(row.get('detail') or '')[:130])}</td></tr>"
-        for row in rows)
     form = (f"<form class='row' method=get><input name=name value='{esc(name)}' "
             "placeholder='settings · broadcast · user · store'>"
             f"<input name=days type=number value='{int(days)}' min=1 max=365 "
             "style='width:6rem'><button class='ok'>দেখুন</button></form>")
-    return f"""<h3>🧾 অ্যাডমিন অ্যাকশন লগ</h3>
-    <p class="muted">কে কখন কী করল — ব্রডকাস্ট, সেটিং বদল, স্টোর, ব্যান, গ্রান্ট,
-      চ্যানেল তৈরি, স্ক্যান — সব এখানে। ডেটা আসে ডেটাবেসের <code>events</code>
-      টেবিল থেকে, তাই আগের রেকর্ডও হারায় না।</p>
-    {form}
-    <p class="row">{chips or "<span class='muted'>এই সময়ে কোনো অ্যাকশন নেই</span>"}</p>
-    <p class="row"><a class="btn grey" href="/admin/logs">📜 সার্ভার লগ</a>
-      <span class="pill">{len(rows)}টি এন্ট্রি (শেষ {int(days)} দিন)</span></p>
-    <div class="card" style="overflow:auto">
-      <table><tr><th>সময়</th><th>অ্যাকশন</th><th>কে</th><th>স্টোর</th><th>রেফ</th>
-      <th>বিস্তারিত</th></tr>{body or '<tr><td colspan=6 class="muted">কিছু নেই</td></tr>'}</table>
-    </div>"""
+    chips_html = (chips or '<span class="muted">এই সময়ে কোনো অ্যাকশন নেই</span>')
+    head = ui.page_head(
+        "অ্যাডমিন অ্যাকশন লগ",
+        "কে কখন কী করল — ব্রডকাস্ট, সেটিং, স্টোর, ব্যান, গ্রান্ট, চ্যানেল, স্ক্যান। "
+        "ডেটা আসে ডেটাবেসের events টেবিল থেকে, তাই পুরোনো রেকর্ডও হারায় না।",
+        eyebrow="AUDIT TRAIL",
+        actions='<a class="btn grey" href="/admin/logs">📜 সার্ভার লগ</a>')
+    return (
+        head + form
+        + f'<p class="row">{chips_html}'
+          f'<span class="pill plain">{len(rows)}টি এন্ট্রি (শেষ {int(days)} দিন)</span></p>'
+        + ui.table(["সময়", "অ্যাকশন", "কে", "স্টোর", "রেফ", "বিস্তারিত"],
+                   [[f"<span class='muted'>{fmt_ts(row.get('ts'), '%d %b %H:%M') if row.get('ts') else '—'}</span>",
+                     esc(audit.label(row.get("name"))),
+                     esc(str(row.get("user_name") or row.get("user_id") or "—")),
+                     esc(str(row.get("store_name") or "")),
+                     f'<code>{esc(str(row.get("ref") or ""))}</code>',
+                     f"<span class='muted'>{esc(str(row.get('detail') or '')[:130])}</span>"]
+                    for row in rows],
+                   empty_row="এই সময়ে কিছু হয়নি")
+    )
 
 
 def files_tools_body() -> str:

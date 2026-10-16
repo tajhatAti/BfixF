@@ -37,11 +37,12 @@ class Setting:
     key: str
     label: str                        # বাংলা নাম (প্যানেলে যা দেখাবে)
     group: str
-    kind: str = "text"                # text | long | int | float | bool
+    kind: str = "text"                # text | long | int | float | bool | choice
     hint: str = ""
     placeholder: str = ""
     default: Any = ""
     env: str = ""                     # equivalent environment variable name
+    choices: tuple = ()               # for kind="choice": the allowed values
 
 
 @dataclass
@@ -180,6 +181,10 @@ REGISTRY: list[Group] = [
                hint="Telegram 429 দিলে বাকি ব্রডকাস্টের গতি নিজে থেকেই কমানো হয়"),
             _s("BROADCAST_TO_BLOCKED", "ব্লক করা ইউজারকেও আবার চেষ্টা করবে",
                "broadcast", kind="bool", default=False),
+            _s("BROADCAST_BUTTONS_ON", "বাটন কোন মেসেজে বসবে", "broadcast", kind="choice",
+               default="last", choices=("last", "each", "none"),
+               hint="last = শেষ মেসেজে (আগের মতো) · each = প্রতিটি মেসেজে · "
+                    "none = বাটন ছাড়া"),
             _s("DIGEST_ENABLED", "সাপ্তাহিক নতুন-ভিডিও ডাইজেস্ট", "broadcast",
                kind="bool", default=False,
                hint="চালু করলে সপ্তাহে একবার নতুন আপলোড নিজে থেকেই সব ইউজারকে যাবে"),
@@ -412,6 +417,11 @@ def validate(key: str, raw: Any) -> tuple[bool, Any, str]:
         return True, number, ""
     if item.kind == "bool":
         return True, _coerce(item, value), ""
+    if item.kind == "choice":
+        allowed = tuple(item.choices or ())
+        if value not in allowed:
+            return False, raw, "এই অপশনগুলোর একটি দিন: " + ", ".join(allowed)
+        return True, value, ""
     if item.key == "FORCE_CHANNEL" and value:
         from app.services import forcejoin
         cleaned = forcejoin.normalize(value)

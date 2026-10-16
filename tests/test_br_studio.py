@@ -107,6 +107,7 @@ async def test_br_opens_the_studio_with_a_keyboard(studio):
 
 @pytest.mark.asyncio
 async def test_text_media_and_buttons_land_in_the_draft(studio):
+    """Every message the admin drops is one draft item (ported from broadcast.py)."""
     await call(br_handlers.br_start, BrEvent())
 
     await call(br_handlers.br_collect, BrEvent(text="<b>আজকের ভিডিও</b>"))
@@ -115,12 +116,27 @@ async def test_text_media_and_buttons_land_in_the_draft(studio):
 
     draft = quickcast.load_draft(ADMIN_ID)
     assert draft is not None
-    assert "আজকের ভিডিও" in draft.text
-    assert len(draft.media) == 1 and draft.media[0].msg_id == 77
+    # first a text message, then the video — in that order, each on its own
+    assert [item.kind for item in draft.items] == ["text", "video"]
+    assert "আজকের ভিডিও" in draft.items[0].text
+    assert draft.items[1].media_key.endswith(":77")
     assert draft.buttons == [[("স্টোর", "https://t.me/x")]]
 
     card = br_handlers._card(draft, ADMIN_ID)
-    assert "মিডিয়া" in card and "স্টোর" not in card.split("কনটেন্ট")[0]
+    assert "আলাদা মেসেজ" in card and "স্টোর" not in card.split("কনটেন্ট")[0]
+
+
+@pytest.mark.asyncio
+async def test_a_typed_html_message_keeps_its_formatting(studio):
+    """The archive kept the admin's own HTML (and converted Telegram's styling)."""
+    await call(br_handlers.br_start, BrEvent())
+    await call(br_handlers.br_collect, BrEvent(text="<b>bold</b> & <i>italic</i>"))
+    draft = quickcast.load_draft(ADMIN_ID)
+    assert draft.items[0].text == "<b>bold</b> & <i>italic</i>"
+
+    await call(br_handlers.br_collect, BrEvent(text="<plain> & unsafe"))
+    draft = quickcast.load_draft(ADMIN_ID)
+    assert draft.items[1].text == "&lt;plain&gt; &amp; unsafe"
 
 
 @pytest.mark.asyncio
@@ -296,8 +312,10 @@ async def test_a_scheduled_campaign_still_gets_its_media_and_origin(studio):
 
     campaign = db.campaigns(limit=1)[0]
     assert campaign["status"] == broadcast.SCHEDULED and campaign["origin"] == "br"
-    attached = db.campaign_media(campaign["id"])
-    assert len(attached) == 1 and attached[0]["msg_id"] == 77
+    # A multi-message draft keeps its list: the text, then the video (msg 77).
+    plan = db.campaign_groups(campaign["id"])
+    assert [row["kind"] for row in plan] == ["text", "video"]
+    assert plan[1]["media_key"].endswith(":77")
 
 
 @pytest.mark.asyncio
@@ -351,3 +369,114 @@ def test_the_pause_between_sends_is_derived_from_the_window():
     assert quickcast.slow_pause(100000, 10) == 0.05       # never slower than a floor
     assert quickcast.slow_pause(2, 60) == 300.0           # and never slower than the cap
     assert quickcast.slow_pause(0, 0) == 0.0
+
+
+# ------------------------------------------- multi-message drafts (broadcast.py)
+@pytest.mark.asyncio
+async def test_a_multi_message_draft_arrives_one_message_at_a_time(studio, monkeypatch):
+    """Text + video + text → three separate messages per user, in that order."""
+    source = SimpleNamespace(media=MessageMediaDocument(document=video_document()))
+    client = FakeClient(known={uid: 1000 + uid for uid in (*USERS, ADMIN_ID)},
+                        messages={(ADMIN_ID, 77): source})
+    runtime.set_client(client)
+    monkeypatch.setattr(runtime, "_client", client, raising=False)
+
+    await call(br_handlers.br_start, BrEvent())
+    await call(br_handlers.br_collect, BrEvent(text="প্রথম মেসেজ"))
+    await call(br_handlers.br_collect, BrEvent(media=_video()))
+    await call(br_handlers.br_collect, BrEvent(text="শেষ মেসেজ"))
+    await call(br_handlers.br_collect, BrEvent(text="সাইট | https://t.me/x"))
+
+    event = BrEvent(text="/brsend", groups=("send", None, ""))
+    await call(br_handlers.br_command, event)
+
+    per_user = {}
+    for uid, text in client.sent_messages:
+        per_user.setdefault(uid, []).append(text)
+    assert sorted(per_user) == sorted(USERS)
+    for uid, bodies in per_user.items():
+        assert len(bodies) == 3, f"user {uid} got {bodies}"
+        assert bodies[0] == "প্রথম মেসেজ" and bodies[2] == "শেষ মেসেজ"
+    campaign = db.campaigns(limit=1)[0]
+    plan = db.campaign_groups(campaign["id"])
+    assert [row["kind"] for row in plan] == ["text", "video", "text"]
+
+
+@pytest.mark.asyncio
+async def test_the_buttons_ride_on_the_last_message(studio, monkeypatch):
+    """The archive put the keyboard on the final item only — same here."""
+    await call(br_handlers.br_start, BrEvent())
+    await call(br_handlers.br_collect, BrEvent(text="এক"))
+    await call(br_handlers.br_collect, BrEvent(text="দুই"))
+    await call(br_handlers.br_collect, BrEvent(text="সাইট | https://t.me/x"))
+
+    seen: list = []
+
+    async def fake_send_draft(chat_id, items, **kwargs):
+        seen.append((chat_id, [item["kind"] for item in items], kwargs.get("buttons_on")))
+        return len(items)
+
+    from app.services import sender as sender_module
+    monkeypatch.setattr(sender_module, "send_draft", fake_send_draft)
+
+    await call(br_handlers.br_command, BrEvent(text="/brsend", groups=("send", None, "")))
+    assert seen and all(entry[2] == "last" for entry in seen)
+
+
+@pytest.mark.asyncio
+async def test_britems_lists_and_brdrop_removes(studio):
+    await call(br_handlers.br_start, BrEvent())
+    await call(br_handlers.br_collect, BrEvent(text="প্রথম"))
+    await call(br_handlers.br_collect, BrEvent(text="দ্বিতীয়"))
+
+    listing = BrEvent(text="/britems", groups=("items", None, ""))
+    await call(br_handlers.br_command, listing)
+    body = str(listing.sent[-1][0])
+    assert "1." in body and "2." in body and "প্রথম" in body
+
+    drop = BrEvent(text="/brdrop", groups=("drop", None, ""))
+    await call(br_handlers.br_command, drop)
+    draft = quickcast.load_draft(ADMIN_ID)
+    assert [item.text for item in draft.items] == ["প্রথম"]
+
+
+@pytest.mark.asyncio
+async def test_brcsv_sends_the_report_as_a_document(studio, monkeypatch):
+    await call(br_handlers.br_start, BrEvent())
+    await call(br_handlers.br_collect, BrEvent(text="রিপোর্ট টেস্ট"))
+    await call(br_handlers.br_command, BrEvent(text="/brsend", groups=("send", None, "")))
+
+    captured: dict = {}
+
+    async def fake_send_file(*args, **kwargs):
+        captured.update(kwargs)
+        captured["args"] = args
+        return SimpleNamespace(id=1)
+
+    import app.services.broadcast as broadcast_module
+    monkeypatch.setattr(broadcast_module.bot, "send_file", fake_send_file, raising=False)
+
+    event = BrEvent(text="/brcsv", groups=("csv", None, ""))
+    await call(br_handlers.br_command, event)
+    assert captured, "no report was sent"
+    csv_bytes = captured["args"][1]
+    assert csv_bytes.startswith(b"\xef\xbb\xbf"), "a BOM keeps Bangla readable in Excel"
+    assert b"user_id" in csv_bytes and str(USERS[0]).encode() in csv_bytes
+
+
+@pytest.mark.asyncio
+async def test_the_report_lists_who_got_it_and_who_did_not(studio):
+    """The archive's `/send` ending: counts *and* a per-user CSV."""
+    campaign = broadcast.create_campaign(ADMIN_ID, text="hi", audience="all", start=False)
+    db.add_campaign_items(campaign["id"], [USERS[0], USERS[1]])
+    db.mark_campaign_item(campaign["id"], USERS[0], "sent")
+    db.mark_campaign_item(campaign["id"], USERS[1], "failed", "blocked by user")
+
+    data, summary = broadcast.report_bytes(campaign["id"])
+    text = data.decode("utf-8-sig")
+    assert summary["sent"] == 1 and summary["failed"] == 1
+    assert f"{USERS[0]}" in text and f"{USERS[1]}" in text
+    assert "blocked by user" in text
+    assert text.splitlines()[1].split(",")[3] == "sent"      # successes first
+    lines = broadcast.failure_lines(campaign["id"])
+    assert lines and "blocked by user" in lines[0]

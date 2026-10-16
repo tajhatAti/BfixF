@@ -208,13 +208,17 @@ class BlockedByUser(Exception):
 
 @dataclass
 class Payload:
-    """Everything a campaign needs to build one message (resolved once per run)."""
+    """Everything a campaign needs to build its messages (resolved once per run)."""
     text: str = ""
     buttons: list = field(default_factory=list)
     file_ids: list[int] = field(default_factory=list)
     media: list[dict] = field(default_factory=list)
     silent: bool = False
     protect: bool = True
+    #: Multi-message drafts (ported from the standalone `broadcast.py`): one entry
+    #: per Telegram message, sent in order, in addition to — or instead of — the
+    #: single text/media above.
+    items: list[dict] = field(default_factory=list)
 
 
 _payload_cache: dict[tuple[str, int], tuple[float, "Payload"]] = {}
@@ -240,6 +244,7 @@ def campaign_payload(campaign: dict) -> Payload:
         media=db.campaign_media(campaign_id) if campaign_id else [],
         silent=bool(campaign.get("silent")),
         protect=bool(campaign.get("protect", 1)),
+        items=db.campaign_groups(campaign_id) if campaign_id else [],
     )
     if campaign_id:
         _payload_cache[cache_key] = (time.time() + PAYLOAD_TTL, payload)
@@ -313,6 +318,31 @@ async def _attempt_send(campaign: dict, user_id: int, payload: "Payload | None",
         if reason:
             raise peers_unreachable(reason)
     peer = await peers.peer_for(user_id)
+
+    # ---------------------------------------------------------------------------
+    # Multi-message draft (ported from the standalone `broadcast.py`): the admin
+    # stacked several messages while drafting — text, photo, video, GIF, file,
+    # audio, voice — and every one of them goes out, in order, with `{name}`
+    # replaced in each. The buttons ride on the last message, exactly like there.
+    # ---------------------------------------------------------------------------
+    if payload.items:
+        from app.services.sender import send_draft
+        plan = []
+        for item in payload.items:
+            item = dict(item)
+            item["text"] = personalize(item.get("text") or "",
+                                       user.get("name") or "", user.get("username") or "")
+            plan.append(item)
+        buttons_on = (settings.get_str("BROADCAST_BUTTONS_ON", "last") or "last").lower()
+        if buttons_on not in ("last", "each", "none"):
+            buttons_on = "last"
+        sent_messages = await send_draft(peer, plan, buttons=buttons,
+                                        silent=payload.silent, protect=payload.protect,
+                                        buttons_on=buttons_on)
+        db.mark_reachable(user_id)
+        log.debug("campaign #%s: %s draft message(s) delivered to %s",
+                  campaign.get("id"), sent_messages, user_id)
+        return "sent"
 
     if payload.media:
         messages = await _source_messages(payload)
@@ -720,6 +750,139 @@ async def notify_owner(campaign: dict, result: dict) -> None:
                         retries=1, raise_after_retries=False)
     except Exception as exc:
         log.debug("could not report campaign to admin: %s", exc)
+
+
+# --------------------------------------------------------------- button storage
+# The archive kept the inline keyboard in memory and showed it in `/buttons`. Here
+# the rows are stored, so the panel can refill the form, a draft link can render
+# them, and a campaign can be cloned later with its buttons intact.
+def store_buttons(campaign_id: int, spec: str) -> int:
+    """Save `label | url` rows (`&&` = same row) for a campaign."""
+    from app.utils import parse_button_spec
+
+    rows = parse_button_spec(spec or "")
+    db._run("DELETE FROM campaign_links WHERE campaign_id = ? AND kind = 'button'",
+            (int(campaign_id),))
+    saved = 0
+    for row_index, row in enumerate(rows):
+        for button_index, (label, url) in enumerate(row):
+            db.add_campaign_link(campaign_id, f"b{campaign_id}-{row_index}-{button_index}",
+                                 label=label, url=url, kind="button")
+            saved += 1
+    return saved
+
+
+def button_spec(campaign_id: int) -> str:
+    """Rebuild the `label | url` text (rows joined with `&&`) from stored buttons."""
+    stored = db.campaign_links(campaign_id, kind="button")
+    if not stored:
+        return ""
+    rows: dict[str, list[str]] = {}
+    for row in stored:
+        parts = str(row["token"]).split("-")
+        key = parts[1] if len(parts) >= 3 else "0"
+        rows.setdefault(key, []).append(f"{row['label']} | {row['url']}")
+    return "\n".join(" && ".join(items) for _, items in sorted(rows.items()))
+
+
+def buttons_of(campaign_id: int) -> list[list[tuple[str, str]]]:
+    """Stored buttons as rows of `(label, url)` — what `send_*` accepts."""
+    from app.utils import parse_button_spec
+
+    spec = button_spec(campaign_id)
+    return parse_button_spec(spec) if spec else []
+
+
+# ------------------------------------------------------------------- reporting
+# The standalone `broadcast.py` answered `/send` with counts *and* a CSV file of who
+# received the message and who did not. That report is built here so the bot, the
+# panel download and any future export all share one definition.
+REPORT_HEADER = ["user_id", "username", "name", "status", "reason"]
+
+
+def report_rows(campaign_id: int) -> list[list]:
+    """One row per recipient: id, @username, name, status, why it failed."""
+    items = db.campaign_items(campaign_id)
+    users = {int(row["user_id"]): row for row in db.all_users_brief()}
+    rows: list[list] = []
+    for item in items:
+        uid = int(item["user_id"])
+        user = users.get(uid) or {}
+        status = item.get("status") or "pending"
+        reason = item.get("error") or ""
+        if status == "blocked":
+            reason = reason or "blocked the bot"
+        elif status == "pending":
+            reason = reason or "not sent yet"
+        rows.append([uid, f"@{user['username']}" if user.get("username") else "",
+                     user.get("name") or "", status, reason])
+    rows.sort(key=lambda row: row[3] != "sent")     # failures first, like the archive
+    return rows
+
+
+def report_bytes(campaign_id: int) -> tuple[bytes, dict]:
+    """CSV report + summary counts. Starts with a BOM so Excel shows Bangla names."""
+    import csv
+    import io
+
+    counts = db.campaign_counts(campaign_id, sync=False)
+    rows = report_rows(campaign_id)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(REPORT_HEADER)
+    writer.writerows(rows)
+    summary = {
+        "campaign_id": campaign_id,
+        "sent": counts.get("sent", 0), "failed": counts.get("failed", 0),
+        "blocked": counts.get("blocked", 0), "pending": counts.get("pending", 0),
+        "total": counts.get("total", 0), "rows": len(rows),
+    }
+    return ("\ufeff" + buffer.getvalue()).encode("utf-8"), summary
+
+
+def report_filename(campaign_id: int) -> str:
+    stamp = time.strftime("%Y%m%d_%H%M")
+    return f"broadcast_report_{int(campaign_id)}_{stamp}.csv"
+
+
+def failure_lines(campaign_id: int, limit: int = 30) -> list[str]:
+    """Short “who failed and why” list, printed under the report in the chat."""
+    users = {int(row["user_id"]): row for row in db.all_users_brief()}
+    out: list[str] = []
+    for item in db.campaign_items(campaign_id, status="failed"):
+        uid = int(item["user_id"])
+        user = users.get(uid) or {}
+        who = user.get("name") or (f"@{user['username']}" if user.get("username") else str(uid))
+        out.append(f"• {who} — {item.get('error') or 'unknown'}")
+        if len(out) >= limit:
+            break
+    return out
+
+
+def report_caption(campaign_id: int) -> str:
+    _data, summary = report_bytes(campaign_id)
+    campaign = db.campaign(campaign_id) or {}
+    title = (campaign.get("title") or "").strip()
+    return (f"📋 <b>রিপোর্ট — ক্যাম্পেইন #{campaign_id}</b>"
+            + (f"\n{title}" if title else "") + "\n\n"
+            f"✅ পাঠানো: {summary['sent']} · ❌ ব্যর্থ: {summary['failed']}\n"
+            f"🚫 ব্লক: {summary['blocked']} · 🕓 বাকি: {summary['pending']}\n"
+            f"<i>CSV ফাইলটি Excel/Sheets-এ খুলে দেখুন — কে পেয়েছে, কে পায়নি।</i>")
+
+
+async def send_report(admin_id: int, campaign_id: int) -> dict:
+    """Send the CSV report to the admin as a document (the archive’s `/send` ending)."""
+    data, summary = report_bytes(campaign_id)
+    try:
+        await safe_call(bot.send_file, admin_id, data, caption=report_caption(campaign_id),
+                        file_name=report_filename(campaign_id), force_document=True,
+                        what="campaign_report", retries=1)
+        summary["delivered"] = True
+    except Exception as exc:
+        log.warning("could not send report for campaign #%s: %s", campaign_id, exc)
+        summary["delivered"] = False
+        summary["error"] = str(exc)[:200]
+    return summary
 
 
 async def test_send(campaign_id: int, admin_ids: list[int]) -> dict:
