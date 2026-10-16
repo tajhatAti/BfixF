@@ -171,11 +171,40 @@ DB_FILE=preview.sqlite3 .venv/bin/python tools/seed_demo.py   # (ঐচ্ছি
 
 ```bash
 .venv/bin/python tools/static_check.py app web tools bot.py run.py   # undefined name = ক্র্যাশ
-.venv/bin/python -m pytest tests -q                                  # ২৮১টি টেস্ট
+.venv/bin/python -m pytest tests -q                                  # ৪৩০+টি টেস্ট
 ```
 
 `static_check.py` না মিললে ডিপ্লয় করবেন না — এটাই সেই ক্লাসের বাগ ধরে যা বট
 কানেক্ট হওয়ার সাথে সাথে ক্র্যাশ করে (`NameError: scheduler` — একবার হয়েছিল)।
+
+---
+
+## ৭. ডকার, systemd, watchdog — তিন রকম “সবসময় চালু” (v3.2)
+
+| উপায় | কখন ভালো | কমান্ড |
+|---|---|---|
+| 🐳 **Docker** | যেকোনো সার্ভার/নাস, এক কমান্ডে চালু | `cp config.env.example config.env` → মান বসান → `docker compose up -d --build` |
+| 🧩 **systemd** | নিজের VPS (রিস্টার্টে নিজেই চালু হয়) | `sudo cp deploy/bfixf.service /etc/systemd/system/` → `sudo systemctl enable --now bfixf` |
+| 👀 **watchdog** | শেয়ারড হোস্ট/প্যানেল যেখানে systemd নেই | cron: `*/5 * * * * cd /home/bfixf/BfixF && bash tools/watchdog.sh >> logs/watchdog.log 2>&1` |
+
+Docker ব্যবহার করলে ডেটাবেস + session + লগ সব `/data` ভলিউমে থাকে — শুধু ওই ভলিউম
+ব্যাকআপ করলেই পুরো বট ফিরে আসবে। কনটেইনারেই হেলথচেক বসানো আছে
+(`/health`), তাই `docker ps` মাঝে মাঝে `unhealthy` দেখালে বোঝা যাবে সাইট উত্তর দিচ্ছে না।
+
+watchdog তিনটা জিনিস দেখে: (১) প্রসেস আছে কি না, (২) `/health` ঠিক আছে কি না,
+(৩) না থাকলে আবার চালু করা। `logs/watchdog.log`-এ কী করল তার হিসাব থাকে।
+`--loop 60` দিলে নিজে থেকেই প্রতি মিনিটে চেক করে (systemd/cron ছাড়াই)।
+
+### ৭.১ GitHub Actions অটো-টেস্ট
+
+`deploy/ci-tests.yml` ফাইলটি প্রতিটি push/PR-এ `tools/static_check.py` + পুরো pytest
+চালায় (Python 3.11 ও 3.12), কোনো সিক্রেট ছাড়াই — stub বট আর temp SQLite ব্যবহার হয়।
+
+**চালু করা (৩০ সেকেন্ড):** ফাইলটার নাম বদলে রেপোতে `.github/workflows/tests.yml`
+বানিয়ে দিলেই কাজ শুরু — GitHub → *Add file → Create new file* → নাম
+`.github/workflows/tests.yml` → কনটেন্ট পেস্ট → Commit। (টোকেনে `workflows`
+পারমিশন ছাড়া অটোমেশন ওই ফাইল পুশ করতে পারে না, তাই হাতে একবার বসাতে হয়।)
+লাল হলে মার্জ না করাই ভালো।
 
 ### সেটআপের পর একবার করে দেখে নিন
 

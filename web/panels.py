@@ -11,6 +11,7 @@ from app import config as cfg, runtime
 from app.services import channels, forcejoin, settings
 from app.storage import db
 from app.utils import esc, fmt_ts
+from web import adminui as ui
 
 
 def _start(ts) -> str:
@@ -23,6 +24,7 @@ def _pill(text: str) -> str:
 
 # ------------------------------------------------------------------- channels
 def channels_body(flash: str = "", warn: str = "") -> str:
+    """📡 Every channel the bot talks to: force-join gates and per-store caches."""
     rows = []
     for row in db.join_channels():
         scope = "🌍 সব স্টোরে" if row.get("store_id") is None else f"🏪 স্টোর #{row['store_id']}"
@@ -63,7 +65,51 @@ def channels_body(flash: str = "", warn: str = "") -> str:
     <table><tr><th>চ্যানেল</th><th>ধরন</th><th>কার জন্য</th><th>ID</th><th>চালু</th><th></th></tr>
     {''.join(rows) or "<tr><td colspan=6 class='muted'>এখনো কোনো চ্যানেল যোগ করা হয়নি</td></tr>"}</table>
     <p class="row"><a class="btn" href="/admin/channels/compose">✍️ চ্যানেলে পোস্ট করুন</a>
-       <a class="btn grey" href="/admin/channels?refresh=1">🔄 আবার রিজলভ করুন</a></p>"""
+       <a class="btn grey" href="/admin/channels?refresh=1">🔄 আবার রিজলভ করুন</a></p>
+    {store_channels_card()}"""
+
+
+def store_channels_card() -> str:
+    """📡 প্রতি স্টোরের নিজের চ্যানেল — এক নজরে, এক ক্লিকে তৈরি।
+
+    Channel per store is what keeps one store's audience out of another's feed: the
+    cache channel, the publishing channel and the force-join gate can all be scoped to
+    a single store from here.
+    """
+    rows = []
+    for store in db.all_stores():
+        cache_key = db.get_meta(f"store_cache_channel:{store['id']}", "")
+        publish = store.get("publish_channel_id") or 0
+        known = db.chat_peer(int(cache_key)) if str(cache_key).lstrip("-").isdigit() else None
+        cache_cell = ("✅ <code>%s</code>" % esc(str(cache_key))) if cache_key else "⏳ তৈরি হয়নি"
+        if cache_key and not (known and known.get("access_hash")):
+            cache_cell += " <span class='pill'>হ্যাশ হয়নি</span>"
+        link = (f"<a class='btn grey' href='{esc(store.get('publish_channel_link'))}' "
+                f"target='_blank'>🔗</a>") if store.get("publish_channel_link") else ""
+        rows.append(
+            f"<tr><td>#{store['id']} · <b>{esc(store['name'])}</b></td>"
+            f"<td>{cache_cell}</td>"
+            f"<td>{('✅ <code>%s</code> %s' % (publish, link)) if publish else '⏳ তৈরি হয়নি'}</td>"
+            f"<td>{'✅ চালু' if store.get('auto_post_enabled') else '—'}</td>"
+            f"<td><div class='row'>"
+            f"<form method=post action='/admin/channels/store/{store['id']}/cache'>"
+            f"<button class='grey'>🎞 ক্যাশ চ্যানেল</button></form>"
+            f"<form method=post action='/admin/stores/{store['id']}/channel/create'>"
+            f"<button class='grey'>📣 পাবলিশ চ্যানেল</button></form>"
+            f"<form method=post action='/admin/channels/store/{store['id']}/cache/reset'>"
+            f"<button class='bad'>♻️ রিসেট</button></form>"
+            f"</div></td></tr>")
+    return f"""
+    <div class="page-heading"><div><p class="eyebrow">PER STORE</p>
+      <h2>🏪 প্রতি স্টোরের আলাদা চ্যানেল</h2></div></div>
+    <p class="muted">প্রতিটা স্টোরের ভিডিও আলাদা প্রাইভেট চ্যানেলে ক্যাশ হয় — এক স্টোরের
+    ভিডিও অন্য স্টোরের ইউজারের কাছে যায় না। চ্যানেলগুলো ইউজারবট নিজেই বানায় আর
+    বটকে অ্যাডমিন করে দেয়; তাই এখানে সাধারণত হাত দিতে হয় না। যদি লগে
+    <code>Could not find the input entity for PeerChannel</code> আসে, ♻️ রিসেট চেপে
+    আবার বানিয়ে নিন।</p>
+    <table><tr><th>স্টোর</th><th>ক্যাশ চ্যানেল</th><th>পাবলিশ চ্যানেল</th><th>অটো-পোস্ট</th><th></th></tr>
+    {''.join(rows) or "<tr><td colspan=5 class='muted'>এখনো কোনো স্টোর নেই</td></tr>"}</table>
+    """
 
 
 def compose_body(composer: dict, store_id: int | None, flash: str = "", warn: str = "") -> str:
@@ -140,6 +186,13 @@ def analytics_body(days: int = 14) -> str:
         f"<td>{db.unique_viewers(f['id'])}</td><td>{f['views']}</td>"
         f"<td><a class='btn grey' href='/admin/analytics/file/{f['id']}'>কে দেখেছে</a></td></tr>"
         for f in top_files)
+    conversion = db.conversion_rate(days)
+    dead = db.dead_files(days=days)
+    dead_rows = "".join(
+        f"<tr><td>#{d['id']} · {esc(d['name'])}</td><td>{esc(d.get('store_name') or '')}</td>"
+        f"<td>{esc(d.get('kind') or '')}</td><td>{_start(d.get('created_at'))}</td>"
+        f"<td><a class='btn grey' href='/admin/analytics/file/{d['id']}'>বিস্তারিত</a></td></tr>"
+        for d in dead[:20])
     event_rows = "".join(
         f"<tr><td>{esc(fmt_ts(e['ts'], '%d %b %H:%M'))}</td>"
         f"<td>{_user_link(e.get('user_id'), e.get('user_name'))}</td>"
@@ -147,14 +200,32 @@ def analytics_body(days: int = 14) -> str:
         f"<td>{esc(e.get('file_name') or '—')}</td><td>{esc((e.get('detail') or '')[:60])}</td></tr>"
         for e in db.events(limit=60))
 
-    return f"""<h3>📊 অ্যানালিটিক্স</h3>
+    return ui.page_head(
+        "অ্যানালিটিক্স",
+        f"শেষ {days} দিনের ছবি — কে এসেছে, কী দেখেছে, কী কিনেছে। "
+        "সংখ্যাগুলো লাইভ ডেটাবেস থেকে আসে।",
+        eyebrow="ANALYTICS",
+        actions='<div class="row">'
+                + "".join(f'<a class="btn {"grey" if d != days else ""}" '
+                          f'href="/admin/analytics?days={d}">{d} দিন</a>'
+                          for d in (7, 14, 30, 90))
+                + f'<a class="btn grey" href="/admin/download">⇩ এক্সপোর্ট</a></div>'
+    ) + f"""
     <div class="grid">
       {_card("ইউজার", users)}{_card("ফাইল", files)}{_card("ক্যাশড", mirrored)}
       {_card("লিংক", links)}{_card("স্টোর", len(stores))}
       {_card("ভিডিও পাঠানো", counts.get("deliver", 0))}
       {_card("স্টোর ওপেন", counts.get("open_store", 0))}
       {_card("পেমেন্ট শুরু", counts.get("pay_start", 0))}
+      {_card("কনভার্শন (ফ্রি → পেইড)", f"{conversion['rate']:.1f}%")}
     </div>
+    <p class="muted">শেষ {days} দিনে {conversion['came']} জন এসেছে, তার মধ্যে
+       {conversion['paid']} জন কিনেছে — কনভার্শন {conversion['rate']:.1f}%।</p>
+    <h4>🥀 ডেড ফাইল — কেউ দেখেইনি ({len(dead)}টি, শেষ {days} দিন)</h4>
+    <p class="muted">শূন্য ভিউ, শূন্য ডেলিভারি — হয়তো নাম/থাম্বনেইল বদলানো দরকার,
+       নাহয় ফাইলটা বাদ দেওয়া যায়।</p>
+    <table><tr><th>ফাইল</th><th>স্টোর</th><th>ধরন</th><th>যোগ হয়েছে</th><th></th></tr>
+    {dead_rows or "<tr><td colspan=5 class='muted'>বাহ! কোনো ডেড ফাইল নেই</td></tr>"}</table>
     <h4>📈 শেষ {days} দিন</h4>
     <table><tr><th>দিন</th><th>ইউজার</th><th>নতুন</th><th>ডেলিভারি</th><th>পেমেন্ট</th></tr>
     {day_rows or "<tr><td colspan=5 class='muted'>কোনো ডেটা নেই</td></tr>"}</table>
@@ -589,6 +660,43 @@ def logs_body(lines: list[str], level: str = "") -> str:
     </p>
     <div class="card" style="max-height:70vh;overflow:auto;font-family:ui-monospace,monospace;
          font-size:12.5px;line-height:1.5">{joined or '<span class="muted">লগ খালি</span>'}</div>"""
+
+
+def audit_body(name: str = "", days: int = 30) -> str:
+    """🧾 who did what — read straight from the `events` table (see services/audit)."""
+    from app.services import audit
+
+    since = time.time() - max(1, min(days, 365)) * 86400
+    rows = audit.recent(limit=400, since=since, name=name)
+    tally = audit.counts(days=days)
+    chips = "".join(
+        f"<span class='pill'>{esc(audit.label(key))} <b>{count}</b></span>"
+        for key, count in tally[:8])
+    form = (f"<form class='row' method=get><input name=name value='{esc(name)}' "
+            "placeholder='settings · broadcast · user · store'>"
+            f"<input name=days type=number value='{int(days)}' min=1 max=365 "
+            "style='width:6rem'><button class='ok'>দেখুন</button></form>")
+    chips_html = (chips or '<span class="muted">এই সময়ে কোনো অ্যাকশন নেই</span>')
+    head = ui.page_head(
+        "অ্যাডমিন অ্যাকশন লগ",
+        "কে কখন কী করল — ব্রডকাস্ট, সেটিং, স্টোর, ব্যান, গ্রান্ট, চ্যানেল, স্ক্যান। "
+        "ডেটা আসে ডেটাবেসের events টেবিল থেকে, তাই পুরোনো রেকর্ডও হারায় না।",
+        eyebrow="AUDIT TRAIL",
+        actions='<a class="btn grey" href="/admin/logs">📜 সার্ভার লগ</a>')
+    return (
+        head + form
+        + f'<p class="row">{chips_html}'
+          f'<span class="pill plain">{len(rows)}টি এন্ট্রি (শেষ {int(days)} দিন)</span></p>'
+        + ui.table(["সময়", "অ্যাকশন", "কে", "স্টোর", "রেফ", "বিস্তারিত"],
+                   [[f"<span class='muted'>{fmt_ts(row.get('ts'), '%d %b %H:%M') if row.get('ts') else '—'}</span>",
+                     esc(audit.label(row.get("name"))),
+                     esc(str(row.get("user_name") or row.get("user_id") or "—")),
+                     esc(str(row.get("store_name") or "")),
+                     f'<code>{esc(str(row.get("ref") or ""))}</code>',
+                     f"<span class='muted'>{esc(str(row.get('detail') or '')[:130])}</span>"]
+                    for row in rows],
+                   empty_row="এই সময়ে কিছু হয়নি")
+    )
 
 
 def files_tools_body() -> str:

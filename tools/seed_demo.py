@@ -32,6 +32,13 @@ DEMO = {
         ("Facebook Marketing Guide.pdf", "Document", 4.2 * 1024 ** 2, 640),
         ("Netflix Intro Pack.zip", "Document", 25 * 1024 ** 2, 410),
     ]),
+    "🎞 রিল ডেমো (ফ্রি ভিডিও)": ("free", [
+        ("কুরিয়ার সিরিজ S01E02", "Video", 0.6 * 1024 ** 3, 890),
+        ("পদ্মা সেতু ডকুমেন্টারি", "Video", 0.4 * 1024 ** 3, 760),
+        ("বাংলা কার্টুন — ঈদ স্পেশাল", "Video", 0.35 * 1024 ** 3, 640),
+        ("কক্সবাজার ট্রাভেল ভ্লগ", "Video", 0.5 * 1024 ** 3, 520),
+        ("ওয়েব সিরিজ পোস্টার", "Photo", 3 * 1024 ** 2, 410),
+    ]),
     "🎵 গানের ভান্ডার": ("free", [
         ("ফুওয়াদ আল মাহমুদ — নির্বাচিত", "Audio", 120 * 1024 ** 2, 720),
         ("Best of Coke Studio 2024", "Audio", 260 * 1024 ** 2, 530),
@@ -39,9 +46,86 @@ DEMO = {
     ]),
 }
 
+#: The clips the seeded preview install streams from disk (`chat_id = 0` in `files`,
+#: see `app/services/feed.py`). Real Telegram needs a bot session; this is how the
+#: reel and the “several at once” wall can be checked before one exists.
+DEMO_CLIPS = [
+    ("কুরিয়ার সিরিজ S01E01", "gradients=s=360x640:c0=0x0b1f3a:c1=0x1f6feb:d=6:speed=.10"),
+    ("বার্তা E01 (ওয়েব সিরিজ)", "gradients=s=360x640:c0=0x241d12:c1=0xc9a45c:d=6:speed=.16"),
+    ("পদ্মা সেতু ডকুমেন্টারি", "testsrc2=size=360x640:rate=25"),
+    ("বাংলা কার্টুন — ঈদ স্পেশাল", "gradients=s=360x640:c0=0x2a1020:c1=0xe05c8a:d=6:speed=.22"),
+]
+
 NAMES = ["রহিম", "করিম", "সাদিয়া", "ইসরাত", "নাবিলা", "তানিম", "ফারহান", "লামিয়া",
          "নাঈম", "মিম", "রাফি", "সাদ", "অহনা", "রিয়াদ", "তাসনিম", "হাসান",
          "জান্নাত", "শাকিব", "প্রিয়া", "মেহেদী", "সুমাইয়া", "আরিফ", "নাফিসা", "রুবেল"]
+
+
+def _ffmpeg() -> str | None:
+    """A bundled ffmpeg, if the optional `imageio-ffmpeg` package is installed."""
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def _run(ffmpeg: str, args: list[str]) -> bool:
+    import subprocess
+    try:
+        done = subprocess.run([ffmpeg, "-v", "error", "-y", *args],
+                              capture_output=True, timeout=120)
+        return done.returncode == 0
+    except Exception:
+        return False
+
+
+def seed_clips(admin_id: int) -> int:
+    """Write a handful of tiny local clips + poster frames for the preview install.
+
+    Silent, 9:16, six seconds each — long enough to show autoplay, the wall and the
+    player, small enough (a few dozen KB) to be disposable.
+    """
+    from pathlib import Path
+    ffmpeg = _ffmpeg()
+    if not ffmpeg:
+        print("  • demo clips skipped — install imageio-ffmpeg for a playable preview")
+        return 0
+    out = Path(os.getenv("FEED_DEMO_DIR", "demo_media"))
+    out.mkdir(parents=True, exist_ok=True)
+    store = db.store_by_name(admin_id, "🎞 রিল ডেমো (ফ্রি ভিডিও)") \
+        or db.create_store(admin_id, "🎞 রিল ডেমো (ফ্রি ভিডিও)")
+    db.update_store(store["id"], is_premium=0)
+    made = 0
+    seconds = 6
+    for index, (title, source) in enumerate(DEMO_CLIPS):
+        msg_id = 900 + index
+        clip = out / f"{msg_id}.mp4"
+        frame = out / f"{msg_id}.jpg"
+        if not clip.is_file() and not _run(ffmpeg, [
+                "-f", "lavfi", "-i", source, "-t", str(seconds), "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart", "-an", str(clip)]):
+            continue
+        if not frame.is_file():
+            _run(ffmpeg, ["-i", str(clip), "-frames:v", "1", "-q:v", "4", str(frame)])
+        size = clip.stat().st_size if clip.is_file() else 0
+        existing = next((row for row in db.files_of(store["id"])
+                         if int(row.get("msg_id") or 0) == msg_id), None)
+        if existing is None:
+            db.add_file(store["id"], title, "Video", 0, msg_id=msg_id, size=size,
+                        duration=seconds)
+        made += 1
+    # a poster photo too, so the reel/wall also shows the photo path
+    poster = out / "990.jpg"
+    if not poster.is_file():
+        _run(ffmpeg, ["-f", "lavfi", "-i", "mandelbrot=s=720x1280:rate=1",
+                      "-frames:v", "1", "-q:v", "4", str(poster)])
+    if poster.is_file() and not next((row for row in db.files_of(store["id"])
+                                      if int(row.get("msg_id") or 0) == 990), None):
+        db.add_file(store["id"], "ওয়েব সিরিজ পোস্টার", "Photo", 0, msg_id=990,
+                    size=poster.stat().st_size)
+    print(f"  • demo clips in {out}: {made} videos + 1 photo")
+    return made
 
 
 def main() -> int:
@@ -68,6 +152,8 @@ def main() -> int:
                     db.bump_views(file_id)
         stores[name] = store
         print(f"  • {name}: {len(db.files_of(store['id']))} files")
+
+    seed_clips(admin_id)
 
     # users + a few grants + one pending order
     premium = stores["🎬 সিনেমা হাউস"]

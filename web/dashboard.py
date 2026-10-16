@@ -49,6 +49,9 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,     # n
 from app import config as cfg                                                 # noqa: E402
 from app import runtime                                                       # noqa: E402
 from app.logger import log, setup_logging                                     # noqa: E402
+from app.services import quickcast as quickcast_service                          # noqa: E402
+from app.services import audit as audit_service                                   # noqa: E402
+from web import adminui as ui                                                    # noqa: E402
 from app.services import (access, basepath, billing, bot_texts, broadcast,    # noqa: E402
                           channels, credentials, feed as feed_service, forcejoin,
                           secrets_guard, settings)
@@ -339,17 +342,36 @@ CSS = """
  }
 """
 
+#: Sidebar map. One row per thing the owner actually does — grouped so the eye can
+#: stop at a group instead of scanning a list of twenty identical rows. Every entry
+#: is a real route (a dead link in the panel is worse than no link at all).
 ADMIN_NAV = (
-    ("EMERGENCY", (("/admin/emergency", "⚠", "Emergency center"),)),
-    ("WORKSPACE", (("/admin", "◫", "Overview"), ("/admin/stores", "▦", "Stores"),
-                   ("/admin/files", "▤", "Videos & files"), ("/admin/channels", "◉", "Channels"))),
-    ("AUDIENCE", (("/admin/users", "♙", "Users"), ("/admin/orders", "▧", "Orders"),
-                  ("/admin/broadcast", "↗", "Campaigns"), ("/admin/links", "⌁", "Share links"))),
-    ("INSIGHTS", (("/admin/analytics", "▥", "Analytics"), ("/admin/self-test", "✓", "System health"),
-                  ("/admin/logs", "≡", "Activity logs"), ("/admin/download", "⇩", "Exports"))),
-    ("SETTINGS", (("/setup", "⚙", "Bot connection"), ("/admin/session", "◌", "Telegram session"),
-                  ("/admin/settings", "⚙", "Preferences"), ("/admin/texts", "✎", "Bot messages"),
-                  ("/admin/security", "◇", "Security"))),
+    ("⚠ জরুরি", (("/admin/emergency", "⚠", "Emergency center"),)),
+    ("📦 কনটেন্ট", (("/admin", "▣", "Overview"), ("/admin/stores", "▦", "Stores"),
+                     ("/admin/files", "▤", "Videos & files"),
+                     ("/admin/channels", "◉", "Channels & cache"),
+                     ("/admin/reel", "🎞", "Home page reel"))),
+    ("📣 অডিয়েন্স", (("/admin/broadcast", "↗", "Broadcasts"), ("/admin/users", "♙", "Users"),
+                      ("/admin/orders", "▧", "Orders"), ("/admin/links", "⌁", "Share links"),
+                      ("/admin/digest", "◫", "Weekly digest"))),
+    ("📊 হিসাব", (("/admin/analytics", "▥", "Analytics"), ("/admin/self-test", "✓", "System health"),
+                   ("/admin/logs", "≡", "Activity logs"),
+                   ("/admin/audit", "🧾", "Admin audit"),
+                   ("/admin/download", "⇩", "Exports"))),
+    ("⚙ সেটিংস", (("/setup", "⚙", "Bot connection"), ("/admin/session", "◌", "Telegram session"),
+                    ("/admin/settings", "☰", "Preferences"), ("/admin/texts", "✎", "Bot messages"),
+                    ("/admin/security", "◇", "Security"))),
+)
+
+#: Shortcuts on the overview page — the same rows, one tap away, no menu hunting.
+ADMIN_QUICK = (
+    ("＋", "Create store", "/admin/stores/new", "নতুন স্টোর ও ফাইল গোছানোর শুরু"),
+    ("▤", "Videos &amp; files", "/admin/files", "নতুন মিডিয়া, ক্যাশ, এক-ক্লিক ব্রডকাস্ট"),
+    ("↗", "New broadcast", "/admin/broadcast", "সবাইকে /br স্টুডিও থেকে"),
+    ("🎞", "Home page reel", "/admin/reel", "অটো-প্লে, ওয়াল ও পিন করা মিডিয়া"),
+    ("◉", "Channels", "/admin/channels", "প্রতি স্টোরের আলাদা চ্যানেল"),
+    ("📲", "Telegram session", "/admin/session", "বট ও ইউজারবট সংযোগ"),
+    ("🧾", "Admin audit", "/admin/audit", "কে কী করল — সম্পূর্ণ হিসাব"),
 )
 
 # Two separate looks. Visitors: minimal black + gold. Admin / setup / sign-in: light paper
@@ -388,79 +410,148 @@ PUBLIC_THEME_CSS = """
  .warnbox { color:var(--accent-dark); background:var(--accent-soft); border-color:#3a3017; }
 
  .landing { display:grid; gap:28px; align-items:center; margin-bottom:8px; }
- @media (min-width:900px) { .landing.has-feed { grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr); } }
+ @media (min-width:900px) { .landing.has-feed { grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr); } }
+ /* ---------------------------------------------------------- auto-play reel */
  .reel-wrap { position:relative; width:min(100%,400px); margin:0 auto; }
- .reel { height:min(80vh,700px); overflow-y:auto; scroll-snap-type:y mandatory; border-radius:30px;
-         border:1px solid var(--line-strong); background:#000; scrollbar-width:none; }
+ .reel { height:min(82vh,720px); overflow-y:auto; overscroll-behavior-y:contain; scroll-snap-type:y mandatory;
+         border-radius:30px; border:1px solid var(--line-strong); background:#000; scrollbar-width:none;
+         -webkit-overflow-scrolling:touch; }
  .reel::-webkit-scrollbar { display:none; }
- .clip { position:relative; display:block; height:100%; scroll-snap-align:start; scroll-snap-stop:always; color:#fff; }
- .clip video, .clip .poster { position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
-                               background:#111 center/cover no-repeat; }
- .clip .cap { position:absolute; left:0; right:0; bottom:0; padding:56px 18px 20px;
-              background:linear-gradient(transparent,rgba(0,0,0,.85)); }
+ .clip { position:relative; display:block; height:100%; scroll-snap-align:start; scroll-snap-stop:always;
+         color:#fff; background:#0a0a0a; overflow:hidden; }
+ .clip .media { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; background:#0a0a0a; }
+ .clip[data-media-kind="photo"] .media { animation:kenburns 18s ease-in-out infinite alternate; }
+ @keyframes kenburns { from { transform:scale(1); } to { transform:scale(1.08); } }
+ .clip .shade { position:absolute; inset:0; background:linear-gradient(180deg,rgba(0,0,0,.28) 0%,
+                rgba(0,0,0,0) 30%, rgba(0,0,0,.15) 55%, rgba(0,0,0,.88) 100%); pointer-events:none; }
+ .clip .cap { position:absolute; left:0; right:0; bottom:0; padding:64px 18px 22px; }
  .clip .cap b { display:block; font-size:16px; line-height:1.35; color:#fff; }
- .clip .cap span { display:inline-block; margin-top:10px; padding:7px 16px; border-radius:999px;
-                    background:var(--accent); color:#14110a; font-size:12px; font-weight:700; }
- button.snd { position:absolute; top:14px; right:14px; z-index:3; width:42px; min-height:42px; padding:0;
-              border-radius:50%; color:#fff; background:rgba(0,0,0,.55); border:1px solid rgba(255,255,255,.28); }
- button.snd:hover { background:rgba(0,0,0,.75); color:#fff; }
+ .clip .cap .sub { display:block; margin-top:3px; color:rgba(255,255,255,.72); font-size:12px; }
+ .clip .cap .cta { display:flex; gap:8px; align-items:center; margin-top:12px; }
+ .clip .cap .cta a { padding:8px 15px; border-radius:999px; background:var(--accent); color:#14110a;
+                     font-size:12px; font-weight:700; }
+ .clip .cap .cta a.ghost { background:rgba(255,255,255,.14); color:#fff; }
+ .reel-top { position:absolute; top:12px; left:12px; right:12px; z-index:4; display:flex; gap:8px;
+             align-items:center; justify-content:space-between; pointer-events:none; }
+ .reel-top .count, .reel-top .badge { pointer-events:auto; padding:5px 11px; border-radius:999px;
+             font-size:11.5px; font-weight:700; color:#fff; background:rgba(0,0,0,.55);
+             border:1px solid rgba(255,255,255,.22); }
+ button.snd, button.pp { position:absolute; z-index:5; width:42px; min-height:42px; padding:0;
+             border-radius:50%; color:#fff; background:rgba(0,0,0,.55);
+             border:1px solid rgba(255,255,255,.26); font-size:16px; }
+ button.snd { top:14px; right:14px; }
+ button.snd:hover, button.pp:hover { background:rgba(0,0,0,.78); color:#fff; }
+ .reel-progress { position:absolute; left:14px; right:14px; bottom:8px; height:3px; z-index:5;
+                  border-radius:999px; background:rgba(255,255,255,.22); overflow:hidden; }
+ .reel-progress i { display:block; height:100%; width:0; background:var(--accent); transition:width .2s linear; }
+ .reel-dots { display:flex; justify-content:center; gap:7px; margin:12px 0 0; }
+ .reel-dots button { width:9px; min-height:9px; padding:0; border-radius:50%;
+                     background:var(--line-strong); border:0; box-shadow:none; }
+ .reel-dots button.on { background:var(--accent); transform:scale(1.25); }
  .reel-note { text-align:center; margin:10px 0 0; color:var(--muted); font-size:12px; }
+ .clip .fail { position:absolute; inset:0; z-index:3; opacity:0; pointer-events:none;
+               display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px;
+               text-align:center; padding:22px; background:linear-gradient(180deg,rgba(0,0,0,.25),rgba(0,0,0,.88));
+               color:#fff; font-size:13px; transition:opacity .3s ease; }
+ .clip.failed .fail { opacity:1; pointer-events:auto; }
+ .clip.failed .loading { display:none; }
+ /* ------------------------------------ “several clips at once” autoplay wall */
+ .awall { display:grid; grid-template-columns:repeat(auto-fit,minmax(148px,1fr)); gap:10px;
+          margin:14px 0 0; }
+ .awall .cell { position:relative; overflow:hidden; border-radius:16px; background:#0b0b0e;
+                border:1px solid var(--line); aspect-ratio:9/16; cursor:pointer; }
+ .awall .cell video, .awall .cell img { position:absolute; inset:0; width:100%; height:100%;
+                object-fit:cover; opacity:0; transition:opacity .45s ease; background:#0b0b0e; }
+ .awall .cell.ready video, .awall .cell.ready img { opacity:1; }
+ .awall .cell .tag2 { position:absolute; left:8px; right:8px; bottom:8px; z-index:2; font-size:11px;
+                color:#fff; text-shadow:0 1px 8px rgba(0,0,0,.9); overflow:hidden;
+                text-overflow:ellipsis; white-space:nowrap; }
+ .awall .cell .badge2 { position:absolute; left:8px; top:8px; z-index:2; font-size:10px; }
+ .awall .fail { position:absolute; inset:0; z-index:3; opacity:0; display:flex; flex-direction:column;
+                align-items:center; justify-content:center; gap:6px; padding:10px; text-align:center;
+                background:linear-gradient(180deg,rgba(0,0,0,.3),rgba(0,0,0,.88)); color:#fff; font-size:12px; }
+ .awall .cell.failed .fail { opacity:1; }
+ .awall-note { text-align:center; color:var(--muted); font-size:12px; margin:10px 0 0; }
+ .clip .loading { position:absolute; inset:0; display:grid; place-items:center; z-index:2;
+                  color:rgba(255,255,255,.75); font-size:26px; }
+
+ /* ------------------------------------------------------------ media gallery */
+ .wall { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,168px),1fr)); gap:12px;
+         margin-top:14px; }
+ .tile { position:relative; display:block; aspect-ratio:9/16; overflow:hidden; border-radius:16px;
+         background:#15151a center/cover no-repeat; border:1px solid var(--line); }
+ .tile img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; opacity:0;
+             transition:opacity .35s; }
+ .tile img.ready { opacity:1; }
+ .tile .tag { position:absolute; left:8px; bottom:8px; right:8px; z-index:2; font-size:11.5px; color:#fff;
+              text-shadow:0 1px 6px rgba(0,0,0,.85); overflow:hidden; display:-webkit-box;
+              -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+ .tile .play { position:absolute; top:8px; right:8px; z-index:2; width:30px; height:30px; border-radius:50%;
+               display:grid; place-items:center; background:rgba(0,0,0,.55); color:#fff; font-size:12px; }
+ .tile:hover { border-color:var(--accent); }
+
+ /* ------------------------------------------------------------- store covers */
+ .store-cover { position:relative; margin:-20px -20px 12px; height:132px; border-radius:19px 19px 0 0;
+                background:#1a1a1e center/cover no-repeat; }
+ .store-cover .badge { position:absolute; left:12px; top:12px; }
+ .watch-hero { border-radius:22px; overflow:hidden; background:#000; border:1px solid var(--line); }
+ .watch-hero video, .watch-hero img { width:100%; max-height:70vh; object-fit:contain; background:#000; display:block; }
  ::selection { background:var(--accent); color:#14110a; }
 """
 
-ADMIN_THEME_CSS = """
- :root { color-scheme:light; --bg:#f4f2eb; --surface:#ffffff; --surface-2:#faf8f2; --sidebar:#121212;
-   --ink:#15140f; --muted:#7a766a; --line:#e9e5d8; --line-strong:#dcd6c4;
-   --accent:#a8803a; --accent-dark:#8a6728; --accent-soft:#f6efdd; --teal:#a8803a;
-   --ok:#1c8a5a; --ok-soft:#e6f5ec; --warn:#a8803a; --warn-soft:#f6efdd; --bad:#c7443b; --bad-soft:#fdeeec;
-   --r:20px; --shadow:0 1px 2px rgba(20,18,10,.04),0 8px 24px rgba(20,18,10,.04); --shadow-lg:0 20px 50px rgba(20,18,10,.16); }
- body { background:var(--bg); font-family:"Hind Siliguri","Bricolage Grotesque",system-ui,"Noto Sans Bengali",sans-serif; }
- h1,h2,h3,h4 { font-family:"Bricolage Grotesque","Hind Siliguri",sans-serif; font-weight:700; }
- a { color:var(--accent); } a:hover { color:var(--accent-dark); }
- code { color:#6b5320; background:var(--accent-soft); border-color:#eadfc3; }
- aside.side { background:var(--sidebar); border:0; color:#d9d5c8; }
- aside.side .brand { color:#fff; }
- aside.side a { color:#b4b0a3; border-radius:999px; }
- aside.side a:hover { color:#fff; background:#1f1f1f; }
- aside.side a.on { color:#14110a; background:#c9a45c; font-weight:700; }
- aside.side .grp { color:#7d7a70; }
- .logo { background:#c9a45c; color:#14110a; box-shadow:none; border-radius:12px; }
- .topbar { background:transparent; backdrop-filter:none; border-bottom:0; }
- .topbar h1 { font-size:22px; letter-spacing:-.02em; }
- .burger { color:var(--ink); background:#fff; border-color:var(--line-strong); }
- .status { color:var(--muted); background:#fff; border-color:var(--line); }
- .status.on i { box-shadow:0 0 0 3px #def3e6; }
- .eyebrow { color:var(--accent); letter-spacing:.2em; }
- .card, details, .settings-section summary { background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow); }
- .card .n { color:var(--ink); font-family:"Bricolage Grotesque",sans-serif; }
- table { border-radius:18px; border-color:var(--line); box-shadow:var(--shadow); }
- th { color:var(--muted); background:var(--surface-2); } th,td { border-bottom-color:#f0ecdf; }
- tbody tr:hover td { background:var(--surface-2); }
- a.btn,button { color:#fff; background:#15140f; border-radius:999px; box-shadow:none; }
- a.btn:hover,button:hover { color:#14110a; background:#c9a45c; box-shadow:none; }
- a.ok,button.ok { color:#fff; background:var(--ok); } a.ok:hover,button.ok:hover { color:#fff; background:#15704a; }
- a.bad,button.bad { color:#fff; background:var(--bad); } a.bad:hover,button.bad:hover { color:#fff; background:#a3352e; }
- a.grey,button.grey { color:var(--ink); background:#fff; border-color:var(--line-strong); }
- a.grey:hover,button.grey:hover { color:var(--accent-dark); background:var(--accent-soft); border-color:#c9a45c; }
- a.warn,button.warn { color:#6b5320; background:var(--accent-soft); border-color:#eadfc3; }
- a.warn:hover,button.warn:hover { color:#14110a; background:#c9a45c; }
- input,textarea,select { border-radius:14px; background:#fff; border-color:var(--line-strong); }
- input:focus,textarea:focus,select:focus { border-color:#c9a45c; box-shadow:0 0 0 3px rgba(201,164,92,.2); }
- input[type=checkbox],input[type=radio] { accent-color:#15140f; }
- .pill, .badge { color:#5d5640; background:var(--surface-2); border-color:var(--line); }
- .flash { color:#14633f; } .warnbox { color:#6b5320; border-color:#eadfc3; }
- .bar>i { background:#c9a45c; }
- .step .num { color:#14110a; background:#c9a45c; }
- .spin { border-color:#eee9da; border-top-color:#c9a45c; }
- ::selection { background:#c9a45c; color:#14110a; }
- @media (min-width:901px) {
-   .shell { padding:14px; gap:14px; }
-   aside.side { top:14px; height:calc(100vh - 28px); border-radius:26px; }
-   .topbar { padding-left:6px; padding-right:6px; }
-   .content main { padding-top:8px; }
- }
-"""
+#: The admin look lives in `web/adminui.py` (design system + components).
 
+
+
+#: Bumped by hand when the panel changes so the owner can see what is deployed.
+PANEL_VERSION = "3.4"
+
+#: One line under the title of every admin page — what the page is *for*. Empty
+#: values simply print nothing, so a new page can be added before its blurb.
+PAGE_BLURBS: dict[str, str] = {
+    "/admin/stores": "স্টোর তৈরি, এডিট, প্রিমিয়াম/ফ্রি আর প্রতিটা স্টোরের চ্যানেল।",
+    "/admin/files": "সব ভিডিও/ছবি — ক্যাশ করা, এক-ক্লিকে ব্রডকাস্ট, ডুপ্লিকেট পরিষ্কার।",
+    "/admin/users": "কে কতটা অ্যাক্টিভ, কে কী কিনেছে — সার্চ, ব্যান, গ্র্যান্ট, মেসেজ।",
+    "/admin/orders": "পেমেন্ট অর্ডার — কে কী পাঠিয়েছে, অনুমোদন, বাতিল।",
+    "/admin/links": "লিমিটেড লিংক — কতবার, কতজন, কে নিয়েছে তার হিসাব।",
+    "/admin/analytics": "ফানেল, ডেড ফাইল, কনভার্শন — সংখ্যায় কনটেন্টের অবস্থা।",
+    "/admin/settings": "বট, সাইট, পেমেন্ট, ব্রডকাস্ট — সব সেটিং এক জায়গায়, রিস্টার্ট ছাড়াই।",
+    "/admin/texts": "বটের প্রতিটি মেসেজের ভাষা নিজে লিখুন (বাংলা/English)।",
+    "/admin/channels": "যেসব চ্যানেল বট ব্যবহার করে — ফোর্স-জয়েন গেট আর প্রতি স্টোরের ক্যাশ।",
+    "/admin/session": "Telegram সেশন — বট ও ইউজারবট সংযোগ, অবস্থা ও পুনরায় লগইন।",
+    "/admin/self-test": "নিজে নিজে পরীক্ষা — কী ঠিক, কী নষ্ট, আর তার সমাধান।",
+    "/admin/logs": "সার্ভারের লাইভ লগ — সমস্যা হলে প্রথমে এখানেই দেখুন।",
+    "/admin/emergency": "জরুরি সুইচ — ক্যাশ আবার কপি, মেইনটেন্যান্স, ব্যাকআপ।",
+    "/admin/security": "পাসওয়ার্ড, সেশন, সিক্রেট ও অ্যাক্সেস নিয়ন্ত্রণ।",
+    "/admin/digest": "সাপ্তাহিক নতুন-ভিডিও ডাইজেস্ট পাঠানোর নিয়ন্ত্রণ।",
+    "/admin/reel": "হোম পেজের অটো-প্লে রিল — কোনটা আগে, কতগুলো, সাউন্ড।",
+    "/admin/download": "SQLite/JSON/CSV — ডেটা ব্যাকআপ ও এক্সপোর্ট।",
+    "/setup": "BotFather টোকেন, API আইডি/হ্যাশ ও অ্যাডমিন আইডি — একবারই লাগে।",
+}
+
+
+def status_tag(value: str) -> str:
+    """Status pill for a campaign/order row (labels live in `web.adminui`)."""
+    return ui.tag(str(value or ""))
+
+
+def broadcast_today(stats: dict) -> int:
+    """How many messages went out today — the “is it alive?” number on the overview."""
+    try:
+        events = db.events_by_day(1)
+        return int(events[0].get("delivered", 0)) if events else 0
+    except Exception:
+        return 0
+
+
+def _nav_trail(active: str, title: str) -> tuple[str, str]:
+    """Where the current page sits in the sidebar (group, page label)."""
+    for group, items in ADMIN_NAV:
+        for href, _icon, label in items:
+            if href == active or (href != "/admin" and active.startswith(href + "/")):
+                clean = group.split(" ", 1)[-1]
+                return clean, label
+    return "পেজ", title
 
 
 def _status_pill() -> str:
@@ -476,31 +567,344 @@ def _status_pill() -> str:
     return '<a class="status" href="setup"><i></i>বট সংযোগ হচ্ছে…</a>'
 
 
-_FEED_JS = """<script>(function(){var reel=document.querySelector('.reel');if(!reel)return;
-var vids=[].slice.call(reel.querySelectorAll('video'));var muted=true;
-function play(v){if(!v.getAttribute('src')){v.setAttribute('src',v.getAttribute('data-src'));}v.muted=muted;var p=v.play();if(p&&p.catch){p.catch(function(){});}}
-var io=new IntersectionObserver(function(es){es.forEach(function(e){var v=e.target;if(e.isIntersecting&&e.intersectionRatio>0.6){play(v);}else{v.pause();}});},{root:reel,threshold:[0,0.6,1]});
-vids.forEach(function(v){io.observe(v);v.addEventListener('error',function(){v.style.display='none';});});
-var b=document.getElementById('snd');if(b){b.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();muted=!muted;vids.forEach(function(v){v.muted=muted;});b.textContent=muted?'🔇':'🔊';});}
+_FEED_JS = """<script>(function(){
+  var reel = document.querySelector('.reel');
+  if (!reel) return;
+  var slides = [].slice.call(reel.querySelectorAll('.clip'));
+  var bar = document.querySelector('.reel-progress > i');
+  var counter = document.querySelector('.reel-top .count');
+  var dots = [].slice.call(document.querySelectorAll('.reel-dots button'));
+  var snd = document.getElementById('snd');
+  var pp = document.getElementById('pp');
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var muted = true, current = 0, advance = null;
+
+  function mediaOf(slide) { return slide.querySelector('video, img.media'); }
+  function load(slide) {
+    var m = mediaOf(slide);
+    if (!m || m.dataset.loaded) return;
+    if (m.dataset.src) m.setAttribute('src', m.dataset.src);
+    m.dataset.loaded = '1';
+    var ld = slide.querySelector('.loading'); if (ld) ld.remove();
+  }
+  function neighbours(index) { [index - 1, index, index + 1].forEach(function(i){
+      if (slides[i]) load(slides[i]); }); }
+  function start(slide, index) {
+    var v = slide.querySelector('video');
+    load(slide);
+    if (!v || reduce) return;
+    v.muted = muted;
+    var p = v.play();
+    if (p && p.catch) p.catch(function(){});
+    slide.classList.add('playing');
+    if (v.dataset.counted !== '1') {
+      v.dataset.counted = '1';
+      try { fetch('reel/play/' + encodeURIComponent(slide.dataset.key),
+                  {keepalive:true, cache:'no-store'}); } catch (e) {}
+    }
+  }
+  function stop(slide) {
+    var v = slide.querySelector('video');
+    if (v) v.pause();
+    slide.classList.remove('playing');
+  }
+  function schedule(slide) {
+    clearTimeout(advance);
+    if (reduce) return;
+    var v = slide.querySelector('video');
+    var wait = v ? 9000 : 5000;
+    advance = setTimeout(function(){ go(current + 1); }, wait);
+  }
+  function go(index) {
+    if (!slides.length) return;
+    current = (index + slides.length) % slides.length;
+    slides[current].scrollIntoView({behavior: reduce ? 'auto' : 'smooth', block: 'start'});
+  }
+  function focusSlide(index) {
+    current = index;
+    slides.forEach(function(s, i){ if (i === index) start(s, i); else stop(s); });
+    neighbours(index);
+    if (counter) counter.textContent = (index + 1) + ' / ' + slides.length;
+    dots.forEach(function(d, i){ d.classList.toggle('on', i === index); });
+    schedule(slides[index]);
+  }
+
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(entry){
+      var index = slides.indexOf(entry.target);
+      if (index < 0) return;
+      if (entry.isIntersecting && entry.intersectionRatio > 0.55) focusSlide(index);
+      else if (entry.intersectionRatio < 0.2) stop(entry.target);
+    });
+  }, {root: reel, threshold: [0.2, 0.55, 0.9]});
+  slides.forEach(function(s){ io.observe(s); });
+
+  reel.addEventListener('scroll', function(){
+    var max = reel.scrollHeight - reel.clientHeight;
+    if (bar) bar.style.width = (max > 0 ? Math.min(100, Math.max(4, reel.scrollTop / max * 100)) : 4) + '%';
+  }, {passive: true});
+
+  slides.forEach(function(slide, index){
+    var v = slide.querySelector('video');
+    if (v) {
+      v.addEventListener('click', function(ev){
+        ev.preventDefault(); ev.stopPropagation();
+        if (v.paused) { v.play().catch(function(){}); slide.classList.add('playing'); }
+        else { v.pause(); slide.classList.remove('playing'); }
+      });
+      v.addEventListener('ended', function(){ go(index + 1); });
+      v.addEventListener('error', function(){
+        // No stream (bot restarting / media not cached yet): show the card and
+        // move on instead of leaving the visitor with a black rectangle.
+        slide.classList.add('failed');
+        v.style.display = 'none';
+        clearTimeout(advance);
+        if (slides.length > 1) setTimeout(function(){ go(index + 1); }, 1400);
+      });
+    }
+    slide.addEventListener('keydown', function(ev){
+      if (ev.key === 'ArrowDown') { ev.preventDefault(); go(current + 1); }
+      if (ev.key === 'ArrowUp') { ev.preventDefault(); go(current - 1); }
+      if (ev.key === ' ') { ev.preventDefault(); var pv = slide.querySelector('video');
+                            if (pv) { pv.paused ? pv.play().catch(function(){}) : pv.pause(); } }
+    });
+    slide.addEventListener('touchstart', function(ev){
+      slide.dataset.y = ev.touches[0].clientY;
+    }, {passive: true});
+    slide.addEventListener('touchend', function(ev){
+      var dy = (slide.dataset.y || 0) - ev.changedTouches[0].clientY;
+      if (Math.abs(dy) > 60) go(current + (dy > 0 ? 1 : -1));
+    }, {passive: true});
+  });
+
+  if (snd) snd.addEventListener('click', function(ev){
+    ev.preventDefault(); ev.stopPropagation();
+    muted = !muted;
+    slides.forEach(function(s){ var v = s.querySelector('video'); if (v) v.muted = muted; });
+    snd.textContent = muted ? '🔇' : '🔊';
+  });
+  if (pp) pp.addEventListener('click', function(ev){
+    ev.preventDefault(); ev.stopPropagation();
+    var v = slides[current] && slides[current].querySelector('video');
+    if (!v) return;
+    if (v.paused) { v.play().catch(function(){}); pp.textContent = '⏸'; }
+    else { v.pause(); pp.textContent = '▶'; }
+  });
+  document.addEventListener('visibilitychange', function(){
+    if (document.hidden) { slides.forEach(stop); clearTimeout(advance); }
+    else if (slides[current]) focusSlide(current);
+  });
+
+  focusSlide(0);
 })();</script>"""
 
 
+def _reel_slide(item: dict, bots: str, first: bool) -> str:
+    """One slide of the auto-playing reel — video or photo, with a poster frame."""
+    kind = item.get("media_kind") or "video"
+    stream = item.get("stream") or ""
+    thumb = item.get("thumb") or ""
+    name = esc(item.get("name") or ("নতুন মিডিয়া" if kind == "video" else "নতুন ছবি"))
+    store = esc(item.get("store_name") or "")
+    key = esc(item.get("key") or "")
+    link = item.get("bot_link") or ""
+    source = f'src="{esc(stream)}"' if first else f'data-src="{esc(stream)}"'
+    if kind == "photo":
+        media = (f'<img class="media" alt="{name}" loading="{"eager" if first else "lazy"}" '
+                 f'decoding="async" poster="{esc(thumb)}" {source}>')
+    else:
+        media = (f'<video class="media" muted loop playsinline preload="{"metadata" if first else "none"}" '
+                 f'{"autoplay" if first else ""} poster="{esc(thumb)}" {source}></video>')
+    cta = (f'<div class="cta"><a href="{esc(link)}" target="_blank" rel="noopener">'
+           f'▶ বটে পুরোটা দেখুন</a></div>') if link else ""
+    sub = f'<span class="sub">{store}</span>' if store else ""
+    # If this slide ever fails to load (bot restarting, media not cached yet) the
+    # visitor sees a friendly card with a way out instead of a black rectangle.
+    fail = (f'<div class="fail"><span>😕 এটা এই মুহূর্তে লোড হলো না</span>'
+            + (f'<a class="btn" href="{esc(link)}" target="_blank" rel="noopener">'
+               f'🤖 বটে দেখুন</a>' if link else "")
+            + '<span>পরেরটায় যাচ্ছে…</span></div>')
+    return (f'<article class="clip" tabindex="0" data-key="{key}" data-media-kind="{kind}">'
+            f'<div class="loading">⏳</div>{media}'
+            f'<div class="shade"></div>'
+            f'<div class="cap"><b>{name}</b>{sub}{cta}</div>{fail}</article>')
+
+
 def _feed_section(bots: str) -> str:
-    """The auto-playing reel of the newest free videos (empty when there is nothing to show)."""
-    rows = feed_service.latest()
+    """The auto-playing reel of the newest (or hand-picked) free media.
+
+    Always renders when there is anything at all to show — a missing thumbnail or a
+    missing bot-side copy no longer hides the whole section.
+    """
+    rows = feed_service.latest(bots)
     if not rows:
         return ""
-    clips = []
-    for row in rows:
-        link = f"https://t.me/{bots}?start=f{row['id']}" if bots else "#"
-        clips.append(
-            f'<a class="clip" href="{esc(link)}" target="_blank" rel="noopener">'
-            f'<div class="poster" style="background-image:url(media/{int(row["id"])}/thumb)"></div>'
-            f'<video muted loop playsinline preload="metadata" data-src="media/{int(row["id"])}"></video>'
-            f'<div class="cap"><b>{esc(row["name"])}</b><span>▶ বটে পুরো ভিডিও দেখুন</span></div></a>')
-    return ('<div class="reel-wrap"><button class="snd" id="snd" type="button" aria-label="Sound">🔇</button>'
-            '<div class="reel">' + "".join(clips) + '</div>'
-            '<p class="reel-note">উপরে-নিচে স্ক্রল করুন · ট্যাপ করলে বটে খুলবে</p></div>' + _FEED_JS)
+    clips = "".join(_reel_slide(item, bots, index == 0) for index, item in enumerate(rows))
+    dots = "".join(f'<button type="button" class="{"on" if i == 0 else ""}" '
+                   f'aria-label="slide {i + 1}"></button>' for i in range(len(rows)))
+    return (
+        '<div class="reel-wrap">'
+        '<div class="reel-top">'
+        f'<span class="count">1 / {len(rows)}</span>'
+        '<span class="badge">🔊 ট্যাপ করে সাউন্ড</span></div>'
+        '<button class="snd" id="snd" type="button" aria-label="Sound">🔇</button>'
+        f'<div class="reel" tabindex="0">{clips}'
+        '<div class="reel-progress"><i></i></div></div>'
+        f'<div class="reel-dots">{dots}</div>'
+        '<p class="reel-note">নিজে থেকেই চলছে · উপরে-নিচে স্ক্রল বা সোয়াইপ করুন · '
+        'ভিডিওতে ট্যাপ = প্লে/পজ</p></div>' + _FEED_JS)
+
+
+_WALL_JS = """<script>(function(){
+  var wall = document.querySelector('.awall');
+  if (!wall) return;
+  var cells = [].slice.call(wall.querySelectorAll('.cell'));
+  if (!cells.length) return;
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var conn = navigator.connection || {};
+  var autoplay = wall.dataset.autoplay === '1' && !reduce && !conn.saveData;
+  function fail(cell){
+    cell.classList.add('failed');
+    var v = cell.querySelector('video'); if (v) v.remove();
+  }
+  function load(cell){
+    var m = cell.querySelector('video, img');
+    if (!m || m.dataset.loaded) return;
+    m.dataset.loaded = '1';
+    if (m.dataset.src) m.setAttribute('src', m.dataset.src);
+    m.addEventListener('loadeddata', function(){ cell.classList.add('ready'); });
+    m.addEventListener('load', function(){ cell.classList.add('ready'); });
+    m.addEventListener('error', function(){ fail(cell); });
+    if (m.tagName === 'IMG' && m.complete) cell.classList.add('ready');
+  }
+  function play(cell){
+    load(cell);
+    var v = cell.querySelector('video');
+    if (!v || !autoplay) return;
+    v.muted = wall.dataset.muted !== '0';
+    v.loop = wall.dataset.loop !== '0';
+    var p = v.play();
+    if (p && p.catch) p.catch(function(){});   // autoplay denied → poster stays
+  }
+  function stop(cell){ var v = cell.querySelector('video'); if (v) v.pause(); }
+  // All the cells of the wall are visible together, so they play together — that
+  // is the “3–4 clips at once” the page advertises, not one lonely video.
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(entry){
+      if (entry.isIntersecting) play(entry.target); else stop(entry.target);
+    });
+  }, {threshold: 0.3});
+  cells.forEach(function(cell){
+    io.observe(cell);
+    cell.addEventListener('click', function(ev){
+      if (ev.target && ev.target.closest && ev.target.closest('a')) return;
+      var v = cell.querySelector('video');
+      if (!v) return;
+      ev.preventDefault();
+      if (v.paused) play(cell); else stop(cell);
+    });
+    var v = cell.querySelector('video');
+    if (v) v.addEventListener('ended', function(){ if (!v.loop) play(cell); });
+  });
+  document.addEventListener('visibilitychange', function(){
+    cells.forEach(function(cell){
+      if (document.hidden) { stop(cell); return; }
+      var box = cell.getBoundingClientRect();
+      if (box.top < window.innerHeight && box.bottom > 0) play(cell);
+    });
+  });
+})();</script>"""
+
+
+def _campaign_media_tile(item: dict) -> str:
+    """One tile of “সংযুক্ত মিডিয়া” — linked to the inbox when we know that row."""
+    item_id = int(item.get("item_id") or 0)
+    badge = "🖼" if (item.get("kind") or "") == "photo" else "🎬"
+    name = esc((item.get("name") or "")[:40])
+    body = (f'<img loading="lazy" src="/inbox/{item_id}/thumb" alt="">' if item_id
+            else '<span class="play">📎</span>')
+    inner = f'{body}<span class="play">{badge}</span><span class="tag">{name}</span>'
+    if not item_id:                       # not from the inbox — nothing to open
+        return f'<span class="tile" style="aspect-ratio:1/1;cursor:default">{inner}</span>'
+    return (f'<a class="tile" style="aspect-ratio:1/1" href="/inbox/{item_id}" '
+            f'target="_blank" rel="noopener">{inner}</a>')
+
+
+def _feed_wall_section(bots: str) -> str:
+    """3–4 clips that autoplay *together* — the “একসাথে অটো-প্লে” view.
+
+    Muted, looping, poster-first (so nothing is ever a black box), and paused the
+    moment the wall scrolls out of view or the tab goes to the background.
+    """
+    rows = feed_service.wall(bots)
+    if not rows:
+        return ""
+    play = feed_service.playback()
+    cells = []
+    for index, item in enumerate(rows):
+        kind = item.get("media_kind") or "video"
+        name = esc(item.get("name") or ("ভিডিও" if kind == "video" else "ছবি"))
+        store = esc(item.get("store_name") or "")
+        source = item.get("stream") or ""
+        thumb = esc(item.get("thumb") or "")
+        key = esc(item.get("key") or "")
+        link = item.get("bot_link") or f"/watch?item={key}"
+        eager = index == 0
+        if kind == "photo":
+            media = (f'<img alt="{name}" decoding="async" '
+                     f'{"src" if eager else "data-src"}="{esc(source)}">')
+        else:
+            media = (f'<video muted loop playsinline '
+                     f'preload="{"metadata" if eager else "none"}" '
+                     f'{"src" if eager else "data-src"}="{esc(source)}" '
+                     f'poster="{thumb}"></video>')
+        cells.append(
+            f'<div class="cell" data-key="{key}">{media}'
+            f'<span class="pill badge2">{"🖼" if kind == "photo" else "🎬"}</span>'
+            f'<span class="tag2">{name}{f" · {store}" if store else ""}</span>'
+            f'<span class="fail"><span>😕 লোড হলো না</span>'
+            f'<a class="btn" href="{esc(link)}" target="_blank" rel="noopener">🤖 বটে দেখুন</a>'
+            f'</span></div>')
+    flags = (f'data-autoplay="{"1" if play["autoplay"] else "0"}" '
+             f'data-muted="{"1" if play["muted"] else "0"}" '
+             f'data-loop="{"1" if play["loop"] else "0"}"')
+    return ('<div class="page-heading" style="margin-top:26px"><div>'
+            '<p class="eyebrow">AUTOPLAY · TOGETHER</p>'
+            f'<h2>🎬 {len(cells)}টি মিডিয়া একসাথে চলছে</h2></div>'
+            '<a class="btn grey" href="/watch">সব দেখুন →</a></div>'
+            f'<div class="awall" {flags}>{"".join(cells)}</div>'
+            '<p class="awall-note">নিজে থেকেই চলছে (মিউট) · যেকোনো একটা ট্যাপ করলে '
+            'প্লে/পজ · 📱 মোবাইল ডেটা বাঁচাতে ছবিগুলো স্ক্রল করলেই লোড হয়</p>'
+            + _WALL_JS)
+
+
+def _gallery_section(bots: str, limit: int = 12) -> str:
+    """A wall of thumbnails — every free video/photo, one tap away."""
+    items = feed_service.gallery(bots, limit=limit)
+    if not items:
+        return ""
+    tiles = []
+    for item in items:
+        link = item.get("bot_link") or f"/watch?item={esc(item.get('key') or '')}"
+        name = esc(item.get("name") or "")
+        kind = item.get("media_kind")
+        badge = "🖼" if kind == "photo" else "▶"
+        tiles.append(
+            f'<a class="tile" href="{esc(link)}" target="_blank" rel="noopener">'
+            f'<img loading="lazy" decoding="async" alt="{name}" src="{esc(item.get("thumb") or "")}" '
+            f'onload="this.classList.add(\'ready\')" onerror="this.remove()">'
+            f'<span class="play">{badge}</span><span class="tag">{name}</span></a>')
+    return ('<div class="page-heading"><div><p class="eyebrow">MEDIA WALL</p>'
+            '<h2 id="media">🎞 নতুন ভিডিও ও ছবি</h2></div>'
+            f'<a class="btn grey" href="/watch">সব দেখুন →</a></div>'
+            f'<div class="wall">{"".join(tiles)}</div>')
+
+
+def store_cover_url(store: dict) -> str:
+    """Where the store's cover image lives (empty when none is set)."""
+    if not store or not (store.get("cover") or "").strip():
+        return ""
+    return f"cover/{int(store['id'])}"
 
 
 def layout(title: str, body: str, active: str = "",
@@ -524,41 +928,70 @@ def layout(title: str, body: str, active: str = "",
 <meta property="og:site_name" content="{brand}">{seo}
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700;800&family=Hind+Siliguri:wght@400;500;600&display=swap">
-<style>{CSS}</style><style>{ADMIN_THEME_CSS if (active.startswith(("/admin", "/setup")) or title == "Sign in") else PUBLIC_THEME_CSS}</style></head>"""
+<style>{CSS}</style><style>{ui.THEME_CSS if (active.startswith(("/admin", "/setup")) or title == "Sign in") else PUBLIC_THEME_CSS}</style></head>"""
     if active.startswith("/admin"):
+        # A page that did not write its own heading still gets one, so every screen
+        # starts the same way (title + one-line explanation + the section it is in).
+        if 'class="page-heading"' not in body:
+            group, label = _nav_trail(active, title)
+            blurb = PAGE_BLURBS.get(active, "")
+            body = ui.page_head(title, blurb, eyebrow=group) + body
+
         def _nav_on(href: str) -> bool:
             if href == "/admin":
                 return active == href
             return active == href or active.startswith(href + "/")
 
-        groups = "".join(
-            f'<div class="grp">{g}</div>' + "".join(
-                f'<a class="{"on" if _nav_on(href) else ""}" href="{href}"><span class="ic">{ic}</span>{label}</a>'
+        def _group(name: str, items: tuple) -> str:
+            """One sidebar group. `<details>` = collapsible without a line of JS,
+            and the group holding the open page starts expanded."""
+            opened = " open" if any(_nav_on(href) for href, _ic, _label in items) else ""
+            links = "".join(
+                f'<a class="{"on" if _nav_on(href) else ""}" href="{href}">'
+                f'<span class="ic">{ic}</span>{label}</a>'
                 for href, ic, label in items)
-            for g, items in ADMIN_NAV)
+            return f'<details class="navgrp"{opened}><summary>{name}</summary>{links}</details>'
+
+        groups = "".join(_group(name, items) for name, items in ADMIN_NAV)
+        # The shell: black rail · hairline topbar with a breadcrumb, the palette
+        # trigger and the bot state · the page body · a quiet footer.
+        crumb_html = ui.crumbs(("Overview", "/admin"), _nav_trail(active, title))
         page = f"""{head}<body>
 <div class="shell">
   <aside class="side">
-    <div class="brand"><span class="logo">🎬</span>{brand}</div>
+    <div class="brand"><span class="logo">🎬</span>
+      <span>{brand}<small>control room</small></span></div>
     {groups}
-    <div class="grp">ACCOUNT</div>
-    <a href="/"><span class="ic">↗</span>Open public site</a>
-    <a href="/admin/logout"><span class="ic">⇥</span>Sign out</a>
+    <div class="rail-foot">
+      <a href="/" target="_blank" rel="noopener"><span class="ic">↗</span>পাবলিক সাইট দেখুন</a>
+      <a href="/admin/audit"><span class="ic">🧾</span>অ্যাডমিন অ্যাকশন লগ</a>
+      <a href="/admin/logout"><span class="ic">⇥</span>সাইন আউট</a>
+      <span>v{PANEL_VERSION} · বট + সাইট একই ডেটাবেজ</span>
+    </div>
   </aside>
   <div class="content">
     <div class="topbar">
-      <div class="row"><button class="burger" onclick="document.body.classList.toggle('nav')">☰</button>
-        <h1>{html.escape(title)}</h1></div>
-      {_status_pill()}
+      <div class="row">
+        <button class="burger" aria-label="মেনু" onclick="document.body.classList.toggle('nav')">☰</button>
+        <div class="crumbs">{crumb_html}</div>
+      </div>
+      <div class="row">
+        <button class="kbd-btn" id="palette-open" type="button">🔎 <span>খুঁজুন</span>
+          <kbd>Ctrl</kbd><kbd>K</kbd></button>
+        {_status_pill()}
+      </div>
     </div>
     <main>{body}</main>
-    <footer>Telegram store bot · ফাইল বট নিজেই পাঠায়</footer>
+    <footer>Telegram store bot · প্রতিটি ফাইল বট নিজেই পাঠায় ·
+      সমস্যা হলে <a href="/admin/emergency">জরুরি পেজ</a> · লগ <a href="/admin/logs">এখানে</a></footer>
   </div>
 </div>
+{ui.PALETTE_JS}
 <script>document.addEventListener('click',function(e){{if(document.body.classList.contains('nav')&&!e.target.closest('aside')&&!e.target.closest('.burger'))document.body.classList.remove('nav')}})</script>
 </body></html>"""
     else:
-        pub = (("/", "🏪 স্টোর"), ("/search", "🔍 সার্চ"), ("/help", "❓ সাহায্য"))
+        pub = (("/", "🏪 স্টোর"), ("/watch", "🎞 মিডিয়া"), ("/search", "🔍 সার্চ"),
+               ("/help", "❓ সাহায্য"))
         nav = "".join(f'<a class="{"on" if href == active else ""}" href="{href}">{label}</a>'
                       for href, label in pub)
         page = f"""{head}<body>
@@ -625,7 +1058,7 @@ def setup_page() -> str:
     back = ""
     page = f"""<!doctype html><html lang="bn"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><base href="__BASEPATH__/">
-<title>সেটআপ · {brand}</title><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700;800&family=Hind+Siliguri:wght@400;500;600&display=swap"><style>{CSS}</style><style>{ADMIN_THEME_CSS}</style></head><body>
+<title>সেটআপ · {brand}</title><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700;800&family=Hind+Siliguri:wght@400;500;600&display=swap"><style>{CSS}</style><style>{ui.THEME_CSS}</style></head><body>
 <div class="wiz">
   <div class="head"><div class="logo">🤖</div>
     <h2>{"বট কানেকশন" if configured else "চলুন বটটা চালু করি"}</h2>
@@ -680,7 +1113,11 @@ def store_cards(stores: list[dict]) -> str:
         lock = "🔒 Premium" if store["is_premium"] else "🆓 Free"
         link = deep_link(f"s{store['id']}") or deep_link(store["slug"] or "")
         desc = esc((store.get("description") or "")[:140])
+        cover = store_cover_url(store)
+        cover_html = (f'<div class="store-cover" style="background-image:url({cover})">'
+                      f'<span class="badge pill">{lock}</span></div>') if cover else ""
         blocks.append(f"""<div class="store">
+   {cover_html}
    <h3>{esc(store['name'])}</h3>
    <div class="row"><span class="pill">{lock}</span>
         <span class="pill">📂 {stats['files']} files</span>
@@ -759,6 +1196,7 @@ def create_app() -> FastAPI:
         stats = db.stats()
         bots = _bot_username()
         feed_html = _feed_section(bots)
+        wall_html = _feed_wall_section(bots)
         body = f"""
         <div class="landing{' has-feed' if feed_html else ''}">
         <div class="hero">
@@ -772,12 +1210,14 @@ def create_app() -> FastAPI:
         </div>
         {feed_html}
         </div>
+        {wall_html}
         <div class="grid">
           {card("Stores", stats['stores'])}
           {card("Videos & files", stats['files'])}
           {card("Community", stats['users'])}
           {card("Total views", stats['views'])}
         </div>
+        {_gallery_section(bots)}
         <div class="howto">
           <b>শুরু করতে তিনটি ধাপ:</b>
           <span>01 · Store বাছুন</span><span>02 · Telegram-এ খুলুন</span>
@@ -788,44 +1228,257 @@ def create_app() -> FastAPI:
         """
         return layout("Home", body, "/")
 
-    @app.get("/media/{file_id}")
-    async def feed_media(request: Request, file_id: int):
-        """Stream one free video (Range supported). Premium / unknown files are a 404."""
+    async def _stream_media(request: Request, row: dict, label: str):
+        """Shared Range streaming for /media/<file> and /reel/<pin>.
+
+        Two sources: a Telegram message (mirror first, then the original, read with
+        whichever client is online) and — for the seeded preview install — a clip on
+        disk (`chat_id = 0`).
+        """
         from fastapi.responses import StreamingResponse
-        row = db.file(file_id)
-        if not feed_service.eligible(row):
-            return Response("Not found", status_code=404)
+        if feed_service.is_demo(row):
+            size = feed_service.local_size(row)
+            if not size:
+                return Response("Not found", status_code=404)
+            try:
+                start, end = feed_service.parse_range(request.headers.get("range"), size)
+            except ValueError:
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+            return StreamingResponse(
+                feed_service.iter_local(row, start, end), status_code=206,
+                media_type="video/mp4" if str(site_kind(row)) == "video" else "image/jpeg",
+                headers={"Accept-Ranges": "bytes",
+                         "Content-Range": f"bytes {start}-{end}/{size}",
+                         "Content-Length": str(end - start + 1),
+                         "Cache-Control": "public, max-age=3600"})
         try:
             msg = await feed_service.message_for(row)
         except Exception as exc:
-            log.debug("feed media %s unavailable: %s", file_id, exc)
+            log.debug("feed media %s unavailable: %s", label, exc)
             msg = None
-        size = int(getattr(getattr(msg, "file", None), "size", 0) or 0)
+        size = feed_service.media_size(msg) if msg is not None else 0
         if msg is None or not size:
             return Response("Not found", status_code=404)
         try:
             start, end = feed_service.parse_range(request.headers.get("range"), size)
         except ValueError:
             return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
-        mime = getattr(msg.file, "mime_type", None) or "video/mp4"
         return StreamingResponse(
-            feed_service.iter_range(msg, start, end), status_code=206, media_type=mime,
+            feed_service.iter_range(msg, start, end), status_code=206,
+            media_type=feed_service.media_mime(msg),
             headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes {start}-{end}/{size}",
-                     "Content-Length": str(end - start + 1), "Cache-Control": "public, max-age=3600"})
+                     "Content-Length": str(end - start + 1),
+                     "Cache-Control": "public, max-age=3600"})
+
+    def site_kind(row: dict) -> str:
+        """`video` / `photo` for a row, however it was stored."""
+        kind = row.get("media_kind") or ("photo" if str(row.get("kind") or "").lower()
+                                         .startswith("photo") else "video")
+        return "photo" if kind == "photo" else "video"
+
+    async def _thumb_response(row: dict, label: str):
+        if feed_service.is_demo(row):
+            frame = feed_service.demo_frame(row)
+            if frame:
+                return Response(frame, media_type="image/jpeg",
+                                headers={"Cache-Control": "public, max-age=3600"})
+        try:
+            data = await feed_service.thumb_for(row)
+        except Exception as exc:
+            log.debug("feed thumb %s unavailable: %s", label, exc)
+            data = None
+        if not data:
+            # Never a broken image: the browser gets a generated poster instead.
+            poster = feed_service.placeholder_svg(
+                row.get("name") or row.get("store_name") or "", site_kind(row))
+            return Response(poster, media_type="image/svg+xml",
+                            headers={"Cache-Control": "public, max-age=600"})
+        return Response(data, media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=3600"})
+
+    @app.get("/media/{file_id}")
+    async def feed_media(request: Request, file_id: int):
+        """Stream one free video/photo (Range supported). Premium/unknown = 404."""
+        row = db.file(file_id)
+        if not feed_service.eligible(row):
+            return Response("Not found", status_code=404)
+        return await _stream_media(request, row, f"file {file_id}")
 
     @app.get("/media/{file_id}/thumb")
     async def feed_thumb(file_id: int):
         row = db.file(file_id)
         if not feed_service.eligible(row):
             return Response("Not found", status_code=404)
+        return await _thumb_response(row, f"file {file_id}")
+
+    @app.get("/reel/{pin_id}")
+    async def reel_media(request: Request, pin_id: int):
+        """Stream a hand-picked reel item (pinned by the owner with /reel add)."""
+        pin = feed_service.eligible_pin(pin_id)
+        if not pin:
+            return Response("Not found", status_code=404)
+        return await _stream_media(request, pin, f"pin {pin_id}")
+
+    @app.get("/reel/{pin_id}/thumb")
+    async def reel_thumb(pin_id: int):
+        pin = feed_service.eligible_pin(pin_id)
+        if not pin:
+            return Response("Not found", status_code=404)
+        return await _thumb_response(pin, f"pin {pin_id}")
+
+    @app.get("/reel/play/{key}")
+    async def reel_play(key: str):
+        """Tiny beacon the reel sends when a slide actually starts playing."""
+        feed_service.note_play(key)
+        return Response(status_code=204)
+
+    @app.get("/inbox/{item_id}")
+    async def inbox_media(item_id: int):
+        row = db.bc_media_item(item_id)
+        if not row:
+            return Response("Not found", status_code=404)
         try:
-            data = await feed_service.thumb_for(row)
+            message = await feed_service.bot.get_messages(int(row["chat_id"]),
+                                                          ids=int(row["msg_id"]))
         except Exception as exc:
-            log.debug("feed thumb %s unavailable: %s", file_id, exc)
+            log.debug("inbox media %s unavailable: %s", item_id, exc)
+            message = None
+        if message is None or not getattr(message, "media", None):
+            return Response("Not found", status_code=404)
+        size = feed_service.media_size(message)
+        if not size:
+            return Response("Not found", status_code=404)
+        start, end = 0, min(size - 1, feed_service.MAX_RESPONSE - 1)
+        from fastapi.responses import StreamingResponse
+        return StreamingResponse(feed_service.iter_range(message, start, end),
+                                 media_type=feed_service.media_mime(message),
+                                 headers={"Cache-Control": "private, max-age=600"})
+
+    @app.get("/inbox/{item_id}/thumb")
+    async def inbox_thumb(item_id: int):
+        row = db.bc_media_item(item_id)
+        if not row:
+            return Response("Not found", status_code=404)
+        item = {"pin_id": 0, "id": -int(item_id), "chat_id": row["chat_id"],
+                "msg_id": row["msg_id"], "kind": row.get("kind") or "video"}
+        return await _thumb_response(item, f"inbox {item_id}")
+
+    @app.get("/cover/{store_id}")
+    async def store_cover(store_id: int):
+        """The cover image the owner set in the bot — a real image on the website."""
+        store = db.store(store_id)
+        if not store:
+            return Response("Not found", status_code=404)
+        raw = (store.get("cover") or "").strip()
+        if not raw:
+            return Response("Not found", status_code=404)
+        chat, _, msg = raw.partition(":")
+        try:
+            chat_id, msg_id = int(chat), int(msg)
+        except ValueError:
+            return Response("Not found", status_code=404)
+        data = None
+        try:
+            message = await feed_service.bot.get_messages(chat_id, ids=msg_id)
+            if message is not None and getattr(message, "media", None):
+                data = (await feed_service.bot.download_media(message, file=bytes, thumb=-1)
+                        or await feed_service.bot.download_media(message, file=bytes))
+        except Exception as exc:
+            log.debug("cover %s unavailable: %s", store_id, exc)
             data = None
         if not data:
             return Response("Not found", status_code=404)
-        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=3600"})
+        return Response(bytes(data), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+    @app.get("/watch", response_class=HTMLResponse)
+    async def public_watch(item: str = "") -> str:
+        """Every free video & photo, with an instant inline player (no download)."""
+        bots = _bot_username()
+        items = feed_service.gallery(bots)
+        if not items:
+            return layout("Watch", "<h2>🎞 মিডিয়া</h2>"
+                                  "<p class='muted'>এখনো কিছু যোগ করা হয়নি — শীঘ্রই আসছে।</p>",
+                          "/watch")
+        chosen = next((row for row in items if row.get("key") == item), items[0])
+        # The hero obeys the same playback switches as the home-page wall (Admin →
+        # Home page reel) instead of hard-coding autoplay: browsers only allow a
+        # muted autoplay, and some owners prefer click-to-play.
+        play = feed_service.playback()
+        attrs = ["id=\"hero-media\"", "controls", "playsinline",
+                 f'preload="{ "auto" if play["autoplay"] else "metadata" }"']
+        if play["autoplay"]:
+            attrs.append("autoplay")
+        if play["muted"]:
+            attrs.append("muted")
+        if play["loop"]:
+            attrs.append("loop")
+        if chosen.get("media_kind") == "photo":
+            hero = (f'<img id="hero-media" src="{esc(chosen.get("stream") or "")}" '
+                    f'alt="{esc(chosen.get("name") or "")}">')
+        else:
+            hero = (f'<video {" ".join(attrs)} '
+                    f'poster="{esc(chosen.get("thumb") or "")}" '
+                    f'src="{esc(chosen.get("stream") or "")}"></video>')
+        bot_link = chosen.get("bot_link") or ""
+        tiles = []
+        for row in items:
+            active = " on" if row.get("key") == chosen.get("key") else ""
+            tiles.append(
+                f'<a class="tile{active}" href="/watch?item={esc(row.get("key") or "")}" '
+                f'data-stream="{esc(row.get("stream") or "")}" '
+                f'data-kind="{esc(row.get("media_kind") or "video")}" '
+                f'data-thumb="{esc(row.get("thumb") or "")}">'
+                f'<img loading="lazy" decoding="async" alt="{esc(row.get("name") or "")}" '
+                f'src="{esc(row.get("thumb") or "")}" onerror="this.remove()">'
+                f'<span class="play">{"🖼" if row.get("media_kind") == "photo" else "▶"}</span>'
+                f'<span class="tag">{esc(row.get("name") or "")}</span></a>')
+        body = f"""
+        <div class="page-heading"><div><p class="eyebrow">WATCH · FREE COLLECTION</p>
+          <h2>🎞 ভিডিও ও ছবি — এখানেই দেখুন</h2></div>
+          {f'<a class="btn" href="{esc(bot_link)}" target="_blank" rel="noopener">🤖 বটে পূর্ণ কোয়ালিটি</a>' if bot_link else ''}
+        </div>
+        <div class="watch-hero">{hero}</div>
+        <p class="muted" id="watch-title" style="margin-top:10px">{esc(chosen.get("name") or "")}
+        {f'· {esc(chosen.get("store_name") or "")}' if chosen.get("store_name") else ''}</p>
+        <div class="wall">{''.join(tiles)}</div>
+        <script>
+          document.querySelectorAll('.tile').forEach(function(tile){{
+            tile.addEventListener('click', function(ev){{
+              if (ev.metaKey || ev.ctrlKey) return;
+              ev.preventDefault();
+              var hero = document.getElementById('hero-media');
+              var kind = tile.dataset.kind, stream = tile.dataset.stream;
+              if (!hero || !stream) return;
+              if (kind === 'photo') {{
+                var img = document.createElement('img');
+                img.id = 'hero-media'; img.src = stream; img.alt = '';
+                hero.replaceWith(img);
+              }} else if (hero.tagName === 'VIDEO') {{
+                hero.src = stream; hero.poster = tile.dataset.thumb || '';
+                hero.play().catch(function(){{}});
+              }} else {{
+                var video = document.createElement('video');
+                video.id = 'hero-media'; video.controls = true;
+                video.muted = {str(play["muted"]).lower()};
+                video.loop = {str(play["loop"]).lower()};
+                video.playsInline = true;
+                video.poster = tile.dataset.thumb || ''; video.src = stream;
+                hero.replaceWith(video); video.play().catch(function(){{}});
+              }}
+              var title = document.getElementById('watch-title');
+              if (title) title.textContent = tile.querySelector('.tag').textContent;
+              document.querySelectorAll('.tile').forEach(function(t){{ t.classList.remove('on'); }});
+              tile.classList.add('on');
+              window.history.replaceState(null, '',
+                location.pathname + '?item=' + encodeURIComponent(tile.dataset.stream));
+              fetch('reel/play/' + encodeURIComponent('file:' + stream.split('/')[1]),
+                    {{keepalive:true, cache:'no-store'}}).catch(function(){{}});
+            }});
+          }});
+        </script>
+        """
+        return layout("Watch", body, "/watch")
 
     @app.get("/help", response_class=HTMLResponse)
     async def public_help() -> str:
@@ -935,7 +1588,11 @@ def create_app() -> FastAPI:
             rows = "".join(rows_list)
             files_html = (f"<table><tr><th>Name</th><th>Type</th><th>Views</th><th></th></tr>{rows}</table>"
                           if rows else '<p class="muted">এই স্টোরে এখনো ফাইল নেই।</p>')
+        cover = store_cover_url(store)
+        cover_block = (f'<div class="store-cover" style="height:210px;margin:0 0 16px;'
+                       f'border-radius:22px;background-image:url({cover})"></div>') if cover else ""
         body = f"""
+        {cover_block}
         <h2>{esc(store['name'])} <span class="pill">{'🔒 Premium' if store['is_premium'] else '🆓 Free'}</span></h2>
         <p class="muted">{esc(store.get('description') or '')}</p>
         <div class="grid">{card("Files", stats['files'])}{card("Views", stats['views'])}{card("Members", stats['grants'])}</div>
@@ -1138,6 +1795,8 @@ def create_app() -> FastAPI:
         runtime.register_client(admin_id, client, me.id, me.first_name or "")
         PENDING_SESSIONS.pop(admin_id, None)
         log.info("Telegram user session connected from website for admin %s", admin_id)
+        audit_service.record("session_start", user_id=admin_id, ref=str(me.id),
+                             detail=me.first_name or "")
         return me.first_name or "Telegram account"
 
     @app.post("/admin/session/verify")
@@ -1236,28 +1895,97 @@ def create_app() -> FastAPI:
             for c in recent) or "<tr><td colspan=6 class='muted'>এখনো ব্রডকাস্ট নেই</td></tr>"
         bot_state = ("🟢 চলছে" if runtime.bot_online() else "🔴 বট অফলাইন "
                      "(ব্রডকাস্ট কিউতে থাকবে)")
+        # “Why did only half the audience get my broadcast?” — answered before it is
+        # asked, with the one number that explains it (access hashes we hold).
+        try:
+            from app.services import peers as peers_service
+            reach = peers_service.stats()
+        except Exception:
+            reach = {"total": 0, "reachable": 0}
+        reach_note = ""
+        if reach.get("total"):
+            missing = max(0, int(reach["total"]) - int(reach["reachable"]))
+            if missing:
+                reach_note = (
+                    f'<div class="warnbox">📡 <b>{reach["reachable"]}/{reach["total"]}</b> ইউজারের '
+                    f'কাছে ব্রডকাস্ট পৌঁছাবে — {missing} জন এখনো বটে /start দেয়নি, তাই Telegram '
+                    f'их অ্যাক্সেস হ্যাশ দেয় না। <a href="/admin/broadcast">ব্রডকাস্ট স্টুডিওতে</a> '
+                    f'প্রতি-ইউজার কারণ দেখা যায়; /start দিলে তারা নিজে থেকেই তালিকায় যোগ হবে।'
+                    f'</div>')
+            else:
+                reach_note = (f'<div class="flash">📡 সব {reach["total"]} ইউজারের কাছে '
+                              f'ব্রডকাস্ট পৌঁছাবে ✅</div>')
+        cache_warning = ""
+        if settings.get_str("STORAGE_CHANNEL_WARNING", ""):
+            cache_warning = ui.note(
+                f"🎞 <b>ক্যাশ চ্যানেল সমস্যা</b> — "
+                f"{esc(settings.get_str('STORAGE_CHANNEL_WARNING'))}<br>"
+                f"<a href='/admin/channels'>📡 চ্যানেল পেজে ঠিক করুন</a> · "
+                f"বটে <code>/storageset probe</code> চাপলেও দেখা যাবে।", "bad")
+        try:
+            recent_actions = audit_service.recent(limit=6)
+        except Exception:
+            recent_actions = []
+        activity_block = ""
+        if recent_actions:
+            activity_block = (
+                "<h3>🕒 এইমাত্র যা হলো</h3>"
+                + ui.timeline([(fmt_ts(row.get("ts"), "%d %b · %H:%M"),
+                                esc(audit_service.label(row.get("name")))
+                                + (f" <span class='muted'>{esc(str(row.get('detail') or ''))[:70]}</span>"
+                                   if row.get("detail") else ""))
+                               for row in recent_actions])
+                + '<p class="muted"><a href="/admin/audit">সম্পূর্ণ '
+                  'অ্যাকশন লগ দেখুন →</a></p>')
+        # ---- design system pieces (web/adminui.py) -------------------------
+        currency = settings.get_str("CURRENCY", "৳")
+        brand = settings.get_str("WEB_TITLE", "Store Bot") or "Store Bot"
+        kpis = ui.kpi_row(
+            ui.kpi("ইউজার", stats["users"], sub=f"গ্রান্ট <b>{stats['grants']}</b>"),
+            ui.kpi("ভিডিও/ফাইল", stats["files"], sub=f"স্টোর <b>{stats['stores']}</b>"),
+            ui.kpi("ভিউ", stats["views"], sub=f"টিকেট <b>{stats['tickets_open']}</b>"),
+            ui.kpi("আয়", money(revenue["total"], currency),
+                   sub=f"⏳ পেন্ডিং <b>{revenue['pending']}</b>"),
+            ui.kpi("আজকের পাঠানো", broadcast_today(stats),
+                   sub=f"বট <b>{'অনলাইন' if runtime.bot_online() else 'অফলাইন'}</b>"),
+        )
+        bot_note = ui.note(
+            f"বট <b>{'অনলাইনে চলছে' if runtime.bot_online() else 'এখন অফলাইন'}</b> — "
+            + ("ব্রডকাস্ট येখনই যাবে, ফাইল সাথে সাথে পৌঁছাবে।" if runtime.bot_online()
+               else "যা পাঠাবেন সব কিউতে থাকবে; <code>/setup</code> বা "
+                    "<a href='/admin/session'>Telegram session</a> দেখে ঠিক করুন।"),
+            "" if runtime.bot_online() else "warn",
+        )
+        # `ADMIN_QUICK` labels carry their own markup (`Videos &amp; files`), so they
+        # are used as author-written HTML — escaping them twice shows “&amp;amp;”.
+        quick = "".join(
+            f'<a href="{href}"><span class="qi">{icon}</span><span><b>{label}</b>'
+            f'<span>{esc(note)}</span></span></a>' for icon, label, href, note in ADMIN_QUICK)
+        campaign_rows = [
+            [f"#{c['id']}", esc(c["title"]),
+             esc(broadcast.audience_label(c["audience"])),
+             status_tag(c["status"]), f"{c['sent']}/{c['total']}",
+             f"<a class='btn grey' href='/admin/broadcast/{c['id']}'>খুলুন</a>"]
+            for c in recent]
         body = f"""
-        <div class="page-heading"><div><p class="eyebrow">AHAD ORGEX / OVERVIEW</p>
-          <h2>Welcome back</h2><p class="muted">আপনার content, audience ও orders—সব এক জায়গায়।</p></div>
-          <span class="pill">{bot_state} · {int(time.time() - STARTED_AT)}s uptime</span></div>
-        <div class="row" style="margin:0 0 18px">
-          <a class="btn" href="/admin/stores/new">＋ Create store</a>
-          <a class="btn grey" href="/admin/session">📲 Connect Telegram</a>
-          <a class="btn grey" href="/admin/broadcast">↗ New campaign</a>
-          <a class="btn grey" href="/admin/self-test">✓ Run system check</a>
-        </div>
-        <div class="grid">
-          {card("Users", stats['users'])} {card("Videos & files", stats['files'])}
-          {card("Stores", stats['stores'])} {card("Views", stats['views'])}
-          {card("Access granted", stats['grants'])} {card("Revenue", money(revenue['total'], settings.get_str('CURRENCY', '৳')))}
-          {card("Pending orders", revenue['pending'])} {card("Open support tickets", stats['tickets_open'])}
-        </div>
-        <p class="muted">আজ: {today} · Store ও account settings যেকোনো সময় পরিবর্তন করতে পারবেন।</p>
-        <div class="page-heading"><div><p class="eyebrow">ACTIVITY</p><h2>Recent campaigns</h2></div>
-          <a class="btn grey" href="/admin/broadcast">View all</a></div>
-        <table><tr><th>#</th><th>Campaign</th><th>Audience</th><th>Status</th><th>Sent</th><th></th></tr>
-        {campaign_rows}</table>
-        """
+        {ui.page_head("Welcome back",
+                      f"{brand} · আজ {today} — কনটেন্ট, অডিয়েন্স আর ব্রডকাস্ট সব এক জায়গায়।",
+                      eyebrow="OVERVIEW",
+                      actions=("<a class='btn' href='/admin/broadcast'>📣 নতুন ব্রডকাস্ট</a>"
+                               "<a class='btn grey' href='/admin/files'>▤ ফাইল</a>"
+                               "<a class='btn grey' href='/admin/self-test'>✓ সিস্টেম চেক</a>"
+                               "<a class='btn grey' href='/admin/emergency'>⚠ জরুরি</a>"))}
+        {bot_note}
+        {reach_note}
+        {cache_warning}
+        {kpis}
+        <h3>⚡ দ্রুত কাজ</h3>
+        <div class="quick">{quick}</div>
+        <h3>📣 সর্বশেষ ব্রডকাস্ট</h3>
+        {ui.table(["#", "ক্যাম্পেইন", "অডিয়েন্স", "অবস্থা", "পাঠানো", ""],
+                  campaign_rows, empty_row="এখনো কোনো ব্রডকাস্ট নেই",
+                  numeric=(4,))}
+        {activity_block}"""
         return layout("Dashboard", body, "/admin")
 
     # ------------------------------------------------------- broadcast studio
@@ -1270,6 +1998,17 @@ def create_app() -> FastAPI:
                     f'<option value="{file_row["id"]}"{mark}>'
                     f'{esc(store["name"])} · {esc(file_row["name"][:60])}</option>')
         return "".join(options)
+
+    def _media_options() -> str:
+        """Videos/photos the owner forwarded to the bot (`/bm`) — not store files."""
+        items = db.bc_media_items(limit=40)
+        if not items:
+            return ('<option value="">— ইনবক্স খালি: বটে /bm দিয়ে ভিডিও পাঠান —</option>')
+        return "".join(
+            f'<option value="{item["id"]}">'
+            f'{"🖼" if item["kind"] == "photo" else "🎬"} '
+            f'{esc((item.get("name") or "media")[:60])} · #{item["id"]}</option>'
+            for item in items)
 
     def _audience_options() -> str:
         rows = ['<option value="all">📣 All users</option>',
@@ -1310,16 +2049,35 @@ def create_app() -> FastAPI:
                          'production start command হিসেবে <code>python run.py</code> ব্যবহার করুন।</div>')
         body = f"""
         {note}{warnbox}{queue_warning}
-        <h3>📢 ব্রডকাস্ট স্টুডিও</h3>
-        <p class="muted">অডিয়েন্স বাছুন, মেসেজ লিখুন (বা একটি ভিডিও/ফাইল বেছে নিন) — কিউ
-        ডেটাবেজে থাকে, তাই বট রিস্টার্ট হলেও ব্রডকাস্ট থেমে যায় না।
-        বট <b>{'🟢 অনলাইন' if bot_ready else '🔴 অফলাইন'}</b>।</p>
+        {ui.page_head("ব্রডকাস্ট স্টুডিও",
+                      "অডিয়েন্স বাছুন, মেসেজ লিখুন বা মিডিয়া দিন — কিউ ডেটাবেজে থাকে, "
+                      "তাই বট রিস্টার্ট হলেও ব্রডকাস্ট থেমে যায় না। এক মেসেজ বা "
+                      "বহু-মেসেজ — দুটোই এখান থেকে।",
+                      eyebrow="BROADCAST",
+                      actions=('<a class="btn grey" href="/admin/reel">🎞 রিল</a>'
+                               '<a class="btn grey" href="/admin/users">👥 ইউজার</a>'
+                               '<a class="btn grey" href="/admin/download">⇩ রিপোর্ট/এক্সপোর্ট</a>'))}
         <div class="card">
           <form method=post action="/admin/broadcast/new">
             <label>Audience</label>
             <select name=audience>{_audience_options()}</select>
             <label>Attach a file / video (optional)</label>
             <select name=file_id>{_files_options()}</select>
+            <label>ব্রডকাস্ট মিডিয়া ইনবক্স থেকে (একাধিক বাছা যায় — অ্যালবাম হবে)</label>
+            <select name=media_ids multiple size=5>{_media_options()}</select>
+            <p class="muted">বটে <code>/bm</code> দিয়ে যেকোনো ভিডিও/ছবি ফরওয়ার্ড করলে সেটা
+            এখানে আসে — স্টোরে যোগ করা লাগে না।</p>
+            <label>📤 পাঠানোর ধরন</label>
+            <select name=mode>
+              <option value="single">এক মেসেজ — টেক্সট + অ্যালবাম (আগের মতো)</option>
+              <option value="multi">বহু-মেসেজ — প্রতিটা আলাদা মেসেজ, ক্রম অনুযায়ী</option>
+            </select>
+            <p class="muted">“বহু-মেসেজ” দিলে উপরের টেক্সটটা <b>প্রথম মেসেজ</b> হয়, তারপর
+            বাছা মিডিয়াগুলো একটার পর একটা আলাদা মেসেজ হয়ে যায় (বটের <code>/br</code>
+            স্টুডিওর মতোই)। বাটন শেষ মেসেজে বসে — <code>/admin/settings</code> →
+            “বাটন কোন মেসেজে বসবে” দিয়ে বদলানো যায়।</p>
+            <label>প্রতিটা মিডিয়ার ক্যাপশন (ঐচ্ছিক — প্রতি লাইনে একটি, ক্রম অনুযায়ী)</label>
+            <textarea name=captions rows=3 placeholder="১ম মিডিয়ার ক্যাপশন&#10;২য় মিডিয়ার ক্যাপশন"></textarea>
             <label>Message (HTML allowed, <code>{{name}}</code> = user's name)</label>
             <textarea name=text rows=6 placeholder="আজকের নতুন ভিডিও এসেছে 🎬"></textarea>
             <label>ইনলাইন বাটন — প্রতি লাইনে <code>লেবেল | লিংক</code>
@@ -1327,6 +2085,10 @@ def create_app() -> FastAPI:
             <textarea name=buttons rows=3>{settings.get_str('BROADCAST_DEFAULT_BUTTONS') or "📢 জয়েন | https://t.me/mychannel"}</textarea>
             <div class="chk"><input type=checkbox name=online value=1 checked id=ob>
               <label for=ob>মেসেজের নিচে “🟢 অনলাইন — স্টোর খুলুন” বাটন দিন</label></div>
+            <label>🐢 ধীর মোড — পুরো তালিকা কত মিনিট ধরে পাঠাবে? (০ = স্বাভাবিক গতি)</label>
+            <input name=slow_minutes type=number min=0 max=720 value="0" step="1">
+            <p class="muted">Telegram-এর সীমা ~৩০ মেসেজ/সেকেন্ড; বিশাল তালিকায় ধীর মোড
+            নিরাপদ (৫০০০ জন → ৩০ মিনিট দিলে প্রতি মেসেজ ~০.৩৬ সেকেন্ড পরে যায়)।</p>
             <div class="row">
               <button class="ok" name=action value=start>🚀 তৈরি করে শুরু করুন</button>
               <button class="grey" name=action value=draft>📝 খসড়া রাখুন</button>
@@ -1351,7 +2113,10 @@ def create_app() -> FastAPI:
     async def studio_create(request: Request, audience: str = Form("all"),
                             file_id: int = Form(0), text: str = Form(""),
                             action: str = Form("start"), buttons: str = Form(""),
-                            online: str = Form("")):
+                            online: str = Form(""),
+                            slow_minutes: float = Form(0),
+                            mode: str = Form("single"), captions: str = Form(""),
+                            media_ids: list[int] = Form(default=[])):
         blocked = _guard(request)
         if blocked:
             return blocked
@@ -1360,18 +2125,66 @@ def create_app() -> FastAPI:
             return RedirectResponse("/admin/broadcast?warn=অজানা+ক্যাম্পেইন+অ্যাকশন", status_code=303)
         body = (text or "").strip()
         files = [file_id] if file_id else []
-        if not body and not files:
+        media = []
+        for item_id in (media_ids or [])[:10]:
+            row = db.bc_media_item(int(item_id))
+            if row:
+                media.append({"chat_id": row["chat_id"], "msg_id": row["msg_id"],
+                              "kind": row.get("kind") or "video",
+                              "name": row.get("name") or ""})
+                db.touch_bc_media(int(item_id))
+        if not body and not files and not media:
             return RedirectResponse("/admin/broadcast?warn=মেসেজ+বা+ফাইল+কিছুই+দিননি",
                                     status_code=303)
         targets = broadcast.resolve_audience(0, audience)
         if not targets:
             return RedirectResponse("/admin/broadcast?warn=এই+অডিয়েন্সে+কেউ+নেই", status_code=303)
         owner = cfg.ADMIN_IDS[0] if cfg.ADMIN_IDS else 0
+        # “বহু-মেসেজ” mode: the text becomes message #1 and every chosen media item
+        # becomes its own message (the same model as the bot's `/br` studio and the
+        # standalone broadcast bot). Captions line up with the media, in order.
+        draft_items: list[dict] = []
+        if (mode or "").strip().lower() == "multi":
+            if body:
+                draft_items.append({"kind": "text", "text": body})
+            caption_lines = [line.strip() for line in (captions or "").splitlines()]
+            # The single "attach a file" select is a message of its own in this mode,
+            # otherwise a store file would be silently dropped.
+            for file_row in files:
+                row = db.file(int(file_row)) or {}
+                draft_items.append({
+                    "kind": (row.get("kind") or "document").lower(),
+                    "file_id": int(file_row),
+                    "text": caption_lines[0] if caption_lines else "",
+                    "name": row.get("name") or "",
+                })
+            for index, item in enumerate(media):
+                at = index + (1 if files else 0)
+                draft_items.append({
+                    "kind": (item.get("kind") or "video"),
+                    "media_key": f"{int(item.get('chat_id') or 0)}:{int(item.get('msg_id') or 0)}",
+                    "text": caption_lines[at] if at < len(caption_lines) else "",
+                    "name": item.get("name") or "",
+                })
+            if not draft_items:
+                return RedirectResponse(
+                    "/admin/broadcast?warn=বহু-মেসেজ+মোডে+অন্তত+একটা+মেসেজ+বা+মিডিয়া+দিন",
+                    status_code=303)
         # Tests and drafts are always non-sendable until an admin explicitly starts them.
-        campaign = broadcast.create_campaign(owner, text=body, audience=audience,
-                                            files=files, start=(action == "start"),
-                                            buttons=buttons,
-                                            online_button=1 if online else 0)
+        # Slow mode: spread the audience over N minutes (Telegram's own advice for
+        # big lists — the global ceiling is ~30 messages/second).
+        pause = (quickcast_service.slow_pause(len(targets), slow_minutes)
+                 if slow_minutes and slow_minutes > 0 else 0.0)
+        campaign = broadcast.create_campaign(
+            owner, text=body if not draft_items else "", audience=audience,
+            files=files if not draft_items else [], start=(action == "start"),
+            buttons=buttons, media=media if not draft_items else [],
+            origin="panel", pause_seconds=pause,
+            online_button=1 if online else 0,
+            title=((re.sub(r"<[^>]+>", "", body).strip().splitlines() or [""])[0][:40]
+                   if draft_items else ""))
+        if draft_items:
+            db.set_campaign_groups(campaign["id"], draft_items)
         campaign_id = campaign["id"]
         if action == "test":
             if not cfg.ADMIN_IDS:
@@ -1453,6 +2266,44 @@ def create_app() -> FastAPI:
                f"<p class='muted'>একই কারণে আটকে থাকা সবাইকে এক ক্লিকে আবার পাঠাতে "
                f"🔁 Retry failed চাপুন। ইউজার বটকে ব্লক করলে সেটা টেলিগ্রামের নিয়ম — "
                f"শুধু বট-ই মেসেজ পাঠাতে পারে না, কোনো উপায় নেই।</p></div>") if reasons else ""
+        # Multi-message drafts (ported from `broadcast.py`): the campaign is a list
+        # of messages, so show that list — what goes out, in which order.
+        plan = db.campaign_groups(campaign_id)
+        items_preview = ""
+        if plan:
+            kind_icon = {"text": "💬", "photo": "🖼", "video": "🎬", "animation": "🎞",
+                         "document": "📄", "audio": "🎵", "voice": "🎤"}
+            rows = "".join(
+                f"<tr><td class='muted'>{index}</td>"
+                f"<td>{kind_icon.get(row.get('kind') or 'text', '📦')} "
+                f"{esc(row.get('kind') or 'text')}</td>"
+                f"<td>{esc(re.sub(r'<[^>]+>', '', row.get('text') or '')[:160]) or '<span class=muted>—</span>'}</td>"
+                f"<td class='muted'>{esc(row.get('media_key') or '')}</td></tr>"
+                for index, row in enumerate(plan, start=1))
+            items_preview = (f'<div class="card"><h4>🧵 বহু-মেসেজ খসড়া — {len(plan)}টি '
+                             f'আলাদা মেসেজ (এই ক্রমেই যাবে)</h4>'
+                             f'<table><tr><th>#</th><th>ধরন</th><th>টেক্সট/ক্যাপশন</th>'
+                             f'<th>মিডিয়া সোর্স</th></tr>{rows}</table></div>')
+        attached = db.campaign_media(campaign_id)
+        media_preview = ""
+        if attached:
+            tiles = "".join(_campaign_media_tile(item) for item in attached)
+            media_preview = (f'<div class="card"><h4>সংযুক্ত মিডিয়া ({len(attached)}টি) — '
+                             f'একসাথে অ্যালবাম হয়ে যাবে</h4><div class="wall">{tiles}</div></div>')
+        # The share link used to be shown once, in a flash message, and then lost.
+        # Keep it on the page (and easy to copy) for as long as it exists.
+        share_tokens = db.campaign_links(campaign_id, kind="draft")
+        share_card = ""
+        if share_tokens:
+            links = "".join(
+                f"<li><code>/draft/{esc(row['token'])}</code> — "
+                f"{int(row.get('clicks') or 0)} বার খোলা হয়েছে "
+                f"<a class='btn grey' href='/draft/{esc(row['token'])}' target='_blank'>↗ খুলুন</a></li>"
+                for row in share_tokens)
+            share_card = (f"<div class='card'><h4>🔗 খসড়ার পাবলিক লিংক "
+                          f"({len(share_tokens)}টি)</h4><ul class='share-links'>{links}</ul>"
+                          f"<p class='muted'>লিংকটা যে কেউ খুলতে পারে — শুধু পড়ার জন্য, "
+                          f"কোনো অ্যাডমিন তথ্য বা বাটন সেখানে যায় না।</p></div>")
         missing_media = [fid for fid in (campaign.get("file_ids") or [])
                          if not (db.file(fid) or {}).get("mirror_msg")]
         cache_warn = (f"<div class='warnbox'>🎞 {len(missing_media)} টি ফাইলের বট-কপি এখনো "
@@ -1472,12 +2323,17 @@ def create_app() -> FastAPI:
         <p class="muted">Audience: {esc(broadcast.audience_label(campaign['audience']))} ·
         Created {_start(campaign['created_at'])} ·
         Started {_start(campaign['started_at'])} · Finished {_start(campaign['finished_at'])}</p>
+        {items_preview}
+        {share_card}
         <div class="card"><h4>প্রিভিউ</h4><div>{broadcast.preview(campaign) or '<span class=muted>— (শুধু ফাইল) —</span>'}</div></div>
+        {media_preview}
         <div class="row" style="margin:14px 0">
           <form method=post action="/admin/broadcast/{campaign_id}/start"><button class="ok">🚀 Send now</button></form>
           <form method=post action="/admin/broadcast/{campaign_id}/cancel"><button class="bad">⏹ Stop</button></form>
           <form method=post action="/admin/broadcast/{campaign_id}/retry"><button class="warn">🔁 Retry failed</button></form>
           <form method=post action="/admin/broadcast/{campaign_id}/test"><button class="grey">🧪 Test to me</button></form>
+          <a class="btn grey" href="/admin/broadcast/{campaign_id}/report.csv">📊 রিপোর্ট CSV</a>
+          <form method=post action="/admin/broadcast/{campaign_id}/share"><button class="grey">🔗 খসড়ার লিংক</button></form>
           <form method=post action="/admin/broadcast/{campaign_id}/delete"><button class="bad">🗑 Delete</button></form>
         </div>
         {cache_warn}{why}
@@ -1521,6 +2377,67 @@ def create_app() -> FastAPI:
         """
         return layout(f"Campaign {campaign_id}", body, "/admin/broadcast")
 
+    @app.get("/admin/broadcast/{campaign_id}/report.csv")
+    async def admin_campaign_report(request: Request, campaign_id: int):
+        """Who received the broadcast and who did not — the archive's `/send` CSV."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        campaign = db.campaign(campaign_id)
+        if campaign is None:
+            return RedirectResponse("/admin/broadcast?warn=ক্যাম্পেইন+নেই", status_code=303)
+        data, _summary = broadcast.report_bytes(campaign_id)
+        headers = {"Content-Disposition": f'attachment; filename="{broadcast.report_filename(campaign_id)}"'}
+        return Response(content=data, media_type="text/csv; charset=utf-8", headers=headers)
+
+    @app.post("/admin/broadcast/{campaign_id}/share")
+    async def admin_campaign_share(request: Request, campaign_id: int):
+        """Give the draft a public link someone else can open (nothing gets sent)."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        campaign = db.campaign(campaign_id)
+        if campaign is None:
+            return RedirectResponse("/admin/broadcast?warn=ক্যাম্পেইন+নেই", status_code=303)
+        token = quickcast_service.share_draft(campaign_id)
+        audit_service.record("draft_shared", ref=str(campaign_id), detail=token)
+        return RedirectResponse(f"/admin/broadcast/{campaign_id}?flash=🔗+লিংক+তৈরি:+draft/{token}",
+                                status_code=303)
+
+    @app.get("/draft/{token}", response_class=HTMLResponse)
+    async def public_draft(token: str):
+        """A read-only look at a draft — for a colleague, before anything is sent."""
+        campaign = db.campaign_by_link(token)
+        if campaign is None:
+            return layout("খসড়া নেই", "<h2>🔍 এই খসড়ার লিংক আর কাজ করে না</h2>"
+                                      "<p class='muted'>সম্ভবত মুছে ফেলা হয়েছে।</p>", "/")
+        db.hit_campaign_link(token)
+        plan = db.campaign_groups(int(campaign["id"]))
+        if not plan:
+            plan = [{"kind": "text", "text": campaign.get("text") or ""}]
+        kind_icon = {"text": "💬", "photo": "🖼", "video": "🎬", "animation": "🎞",
+                     "document": "📄", "audio": "🎵", "voice": "🎤"}
+        tiles = "".join(
+            f'<div class="card"><div class="muted">{index} · '
+            f'{kind_icon.get(row.get("kind") or "text", "📦")} {esc(row.get("kind") or "text")}'
+            f'</div><div style="margin-top:8px">{body or "<span class=muted>—</span>"}</div></div>'
+            for index, row in enumerate(plan, start=1)
+            for body in [(row.get("text") or "").replace("\n", "<br>")])
+        buttons = db.campaign_links(int(campaign["id"]), kind="button")
+        button_html = ""
+        if buttons:
+            button_html = ('<p class="row">' + "".join(
+                f'<a class="btn grey" href="{esc(row["url"])}" rel="noopener" '
+                f'target="_blank">{esc(row["label"])}</a>' for row in buttons) + "</p>")
+        body = f"""
+        <div class="page-heading"><div><p class="eyebrow">DRAFT PREVIEW</p>
+          <h2>👀 খসড়া — {esc(campaign.get('title') or 'ব্রডকাস্ট')}</h2></div></div>
+        <p class="muted">এটা শুধু দেখার জন্য — এখান থেকে কিছু পাঠানো যায় না। মালিক
+        অ্যাডমিন প্যানেল বা বট থেকে অনুমোদন দিলে পাঠানো হবে।</p>
+        {tiles}
+        {button_html}"""
+        return layout("খসড়া", body, "/")
+
     @app.post("/admin/broadcast/{campaign_id}/start")
     async def studio_start(request: Request, campaign_id: int):
         blocked = _guard(request)
@@ -1542,6 +2459,8 @@ def create_app() -> FastAPI:
                            scheduled_at=None, finished_at=None, last_error="")
         db.campaign_counts(campaign_id)
         broadcast.start_campaign(campaign_id)
+        audit_service.record("broadcast_start", ref=str(campaign_id),
+                             detail=f"audience={campaign.get('audience')}")
         return RedirectResponse(f"/admin/broadcast/{campaign_id}?flash=🚀+শুরু+হয়েছে",
                                 status_code=303)
 
@@ -1551,6 +2470,7 @@ def create_app() -> FastAPI:
         if blocked:
             return blocked
         broadcast.cancel_campaign(campaign_id)
+        audit_service.record("broadcast_cancelled", ref=str(campaign_id))
         return RedirectResponse(f"/admin/broadcast/{campaign_id}?flash=⏹+থামানো+হলো",
                                 status_code=303)
 
@@ -1582,6 +2502,8 @@ def create_app() -> FastAPI:
             note = f"🔁+{rearmed}+টি+ফেইল,+{pending}+টি+pending+কিউতে+চালু"
         else:
             note = f"🔁+{rearmed}+টি+ফেইল,+{pending}+টি+pending+কিউতে;+বট+অনলাইন+হলে+শুরু+হবে"
+        audit_service.record("broadcast_retry", ref=str(campaign_id),
+                             detail=f"rearmed={rearmed} pending={pending}")
         return RedirectResponse(
             f"/admin/broadcast/{campaign_id}?flash={note}", status_code=303)
 
@@ -1595,6 +2517,9 @@ def create_app() -> FastAPI:
                 f"/admin/broadcast/{campaign_id}?warn=ADMIN_IDS+সেট+নেই", status_code=303)
         result = await broadcast.test_send(campaign_id, [cfg.ADMIN_IDS[0]])
         message = "🧪+টেস্ট+পাঠানো+হয়েছে" if result.get("ok") else "❌+টেস্ট+পাঠানো+যায়নি"
+        audit_service.record("broadcast_test", ref=str(campaign_id),
+                             detail="ok" if result.get("ok") else
+                                    str((result.get("errors") or ["failed"])[0]))
         return RedirectResponse(f"/admin/broadcast/{campaign_id}?flash={message}", status_code=303)
 
     @app.post("/admin/broadcast/{campaign_id}/delete")
@@ -1602,7 +2527,10 @@ def create_app() -> FastAPI:
         blocked = _guard(request)
         if blocked:
             return blocked
+        row = db.campaign(campaign_id) or {}
         db.delete_campaign(campaign_id)
+        audit_service.record("broadcast_deleted", ref=str(campaign_id),
+                             detail=(row.get("title") or "")[:80])
         return RedirectResponse("/admin/broadcast?flash=🗑+মুছে+ফেলা+হয়েছে", status_code=303)
 
     @app.get("/admin/api/campaign/{campaign_id}")
@@ -1692,6 +2620,8 @@ def create_app() -> FastAPI:
         db.update_store(store["id"], description=(description or "").strip()[:2000],
                         is_premium=1 if str(is_premium) == "1" else 0)
         message = "Store তৈরি হয়েছে।"
+        from app.services import media_cache
+        media_cache.provision_store_later(store["id"])      # per-store channel, in background
         if create_channel:
             result = await channels.create_store_channel(store["id"], title=name)
             if not result.get("ok"):
@@ -1702,6 +2632,8 @@ def create_app() -> FastAPI:
             message += " Telegram channel তৈরি হয়েছে।"
             if result.get("warning"):
                 message += " " + result["warning"]
+        audit_service.record("store_created", store_id=store["id"], ref=name,
+                             detail=f"premium={store['is_premium']} channel={bool(create_channel)}")
         return RedirectResponse(f"/admin/stores/{store['id']}?flash=" + quote_plus(message),
                                 status_code=303)
 
@@ -1722,6 +2654,8 @@ def create_app() -> FastAPI:
             return RedirectResponse(f"/admin/stores/{store_id}?warn=এই+নামে+আরেকটি+store+আছে", status_code=303)
         db.update_store(store_id, name=name, description=(description or "").strip()[:2000],
                         is_premium=1 if str(is_premium) == "1" else 0)
+        audit_service.record("store_edited", store_id=store_id, ref=name,
+                             detail=f"premium={is_premium == '1'}")
         return RedirectResponse(f"/admin/stores/{store_id}?flash=তথ্য+সংরক্ষণ+হয়েছে", status_code=303)
 
     @app.post("/admin/stores/{store_id}/channel/create")
@@ -2181,7 +3115,13 @@ def create_app() -> FastAPI:
             checked = " checked" if value else ""
             return (f'<label class="chk"><input type="checkbox" name="{name}" '
                     f'value="1"{checked}> {esc(item.label)}</label>')
-        if item.kind == "long":
+        if item.kind == "choice":
+            options = "".join(
+                f'<option value="{esc(choice)}"'
+                f'{" selected" if str(value) == str(choice) else ""}>{esc(choice)}</option>'
+                for choice in (item.choices or ()))
+            inner = f'<select name="{name}">{options}</select>'
+        elif item.kind == "long":
             inner = (f'<textarea name="{name}" rows="3" placeholder="{esc(item.placeholder)}">'
                      f'{esc(value)}</textarea>')
         else:
@@ -2218,7 +3158,7 @@ def create_app() -> FastAPI:
                          f'(<code>t.me/+…</code>) দিন — বট সেটাও বুঝবে।</p>')
             opened = " open" if group.key in ("site", "emergency") else ""
             groups_html.append(f"""
-            <details class="settings-section"{opened}>
+            <details class="settings-section" id="g-{group.key}"{opened}>
               <summary><span>{group.icon} {esc(group.label)}</span>
                 <span class="muted">{len(group.settings)} settings · click to expand</span></summary>
               <div class="card settings-inner">
@@ -2233,6 +3173,11 @@ def create_app() -> FastAPI:
                 </form>
               </div>
             </details>""")
+        # A jump-list, so 12 collapsed groups do not have to be opened one by one.
+        index = "".join(
+            f'<a class="btn grey" href="#g-{group.key}">{group.icon} {esc(group.label)}'
+            f'<span class="muted"> ({len(group.settings)})</span></a>'
+            for group in settings.all_groups())
         body = f"""
         {note}{warnbox}
         <h3>⚙️ সেটিংস</h3>
@@ -2249,6 +3194,7 @@ def create_app() -> FastAPI:
           <a class="btn grey" href="/admin/settings/export">⬇️ config.env হিসেবে এক্সপোর্ট</a>
           <a class="btn grey" href="/admin/download">📥 ডেটা এক্সপোর্ট</a>
         </p>
+        <div class="row" style="margin:0 0 14px">{index}</div>
         {''.join(groups_html)}
         """
         return layout("Settings", body, "/admin/settings")
@@ -2278,6 +3224,9 @@ def create_app() -> FastAPI:
         if errors:
             joined = "+".join(f"{key}:{msg}" for key, msg in errors.items())
             return RedirectResponse(f"/admin/settings?warn={joined}", status_code=303)
+        changed = [key for key, value in values.items() if value != settings.get_str(key)]
+        audit_service.record("settings_saved", ref=group_key,
+                             detail=", ".join(changed[:12]) or "কোনো পরিবর্তন নেই")
         return RedirectResponse(
             f"/admin/settings?flash=✅+{group.label}+সেভ+হলো", status_code=303)
 
@@ -2442,8 +3391,51 @@ def create_app() -> FastAPI:
                     if info.get("chat_id"):
                         db.update_join_channel(row["id"], chat_id=info["chat_id"],
                                                title=info.get("title") or row.get("title"))
+        warn = warn or settings.get_str("STORAGE_CHANNEL_WARNING", "")   # cache-channel help
         body = panels.channels_body(flash, warn)
         return layout("Channels", body, "/admin/channels")
+
+    @app.post("/admin/channels/store/{store_id}/cache")
+    async def admin_store_cache_channel(request: Request, store_id: int):
+        """Create (or re-create) one store's private media-cache channel."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        from app.services import media_cache
+        store = db.store(store_id)
+        if not store:
+            return RedirectResponse("/admin/channels?warn=স্টোর+পাওয়া+যায়নি", status_code=303)
+        client = next(iter(runtime.user_clients.values()), None)
+        if client is None:
+            return RedirectResponse(
+                "/admin/channels?warn=আগে+Telegram+session+যুক্ত+করুন", status_code=303)
+        db.set_meta(f"store_cache_channel:{store_id}", "")       # force a fresh one
+        peer = await media_cache.store_cache_peer(client, store)
+        if not peer:
+            return RedirectResponse(
+                "/admin/channels?warn=চ্যানেল+বানানো+গেল+না+—+session/লগ+দেখুন", status_code=303)
+        audit_service.record("cache_channel_created", store_id=store_id, ref=str(peer),
+                             detail=store["name"])
+        return RedirectResponse(
+            f"/admin/channels?flash=✅+{esc(store['name'])}+এর+ক্যাশ+চ্যানেল+তৈরি+হলো",
+            status_code=303)
+
+    @app.post("/admin/channels/store/{store_id}/cache/reset")
+    async def admin_store_cache_reset(request: Request, store_id: int):
+        """Forget a store's cache channel — the next mirror creates a fresh one.
+
+        This is the one-click cure for a stale pair: the channel may have been
+        deleted, or this session never learned it (“Could not find the input entity
+        for PeerChannel”). Mirrored copies stay reachable, only the pointer moves.
+        """
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        db.set_meta(f"store_cache_channel:{int(store_id)}", "")
+        audit_service.record("cache_channel_reset", store_id=store_id, ref=str(store_id))
+        return RedirectResponse(
+            "/admin/channels?flash=♻️+রিসেট+হলো+—+পরের+ক্যাশ+থেকে+নতুন+চ্যানেল",
+            status_code=303)
 
     @app.post("/admin/channels/add")
     async def admin_channels_add(request: Request, ref: str = Form(""),
@@ -2628,6 +3620,8 @@ def create_app() -> FastAPI:
         if not ok:
             return RedirectResponse(f"/admin/texts?lang={lang}&warn={esc(error)}",
                                     status_code=303)
+        audit_service.record("texts_saved", ref=f"{key}:{lang}",
+                             detail=value.strip()[:80] or "ডিফল্ট")
         label = "♻️ ডিফল্ট ফিরে এসেছে" if value.strip() in ("", "-") else "✅ সেভ হয়েছে"
         return RedirectResponse(f"/admin/texts?lang={lang}&flash={esc(label)}",
                                 status_code=303)
@@ -2642,6 +3636,123 @@ def create_app() -> FastAPI:
             return RedirectResponse("/admin/stores?warn=স্টোর+নেই", status_code=303)
         return layout(store["name"], panels.store_admin_body(store, flash, warn),
                       "/admin/stores")
+
+    @app.get("/admin/reel", response_class=HTMLResponse)
+    async def admin_reel(request: Request, flash: str = "", warn: str = ""):
+        """Curate the auto-playing reel / media wall of the public home page."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        from app.services import feed as feed_service
+        note = f'<div class="flash">{esc(flash)}</div>' if flash else ""
+        warnbox = f'<div class="warnbox">{esc(warn)}</div>' if warn else ""
+        info = feed_service.stats()
+        showing = feed_service.latest(_bot_username())
+        rows = "".join(
+            f"<tr><td>#{pin['id']}</td><td>{esc(pin.get('title') or '—')}</td>"
+            f"<td><span class='pill'>{esc(pin.get('kind') or '')}</span></td>"
+            f"<td>{_start(pin.get('added_at'))}</td>"
+            f"<td><div class='row'>"
+            f"<form method=post action='/admin/reel/up/{pin['id']}'><button class='grey'>⬆️</button></form>"
+            f"<form method=post action='/admin/reel/down/{pin['id']}'><button class='grey'>⬇️</button></form>"
+            f"<form method=post action='/admin/reel/delete/{pin['id']}'><button class='bad'>🗑</button></form>"
+            f"</div></td></tr>"
+            for pin in db.feed_pins(limit=50))
+        preview = "".join(
+            f'<a class="tile" style="aspect-ratio:9/16" href="{esc(item.get("stream") or "")}" '
+            f'target="_blank" rel="noopener">'
+            f'<img loading="lazy" src="{esc(item.get("thumb") or "")}" alt="">'
+            f'<span class="play">{"🖼" if item.get("media_kind") == "photo" else "▶"}</span>'
+            f'<span class="tag">{esc(item.get("name") or "")}</span></a>'
+            for item in showing)
+        body = f"""
+        {note}{warnbox}
+        <h3>🎞 হোম পেজের রিল</h3>
+        <p class="muted">ভিজিটর প্রথমেই যেগুলো দেখে — অটো-প্লে, মিউট হয়ে চলে, নিচে-উপরে
+        স্ক্রল করলে পরেরটা। এখানে পিন করা মিডিয়া আগে, তারপর ফ্রি স্টোরের নতুন ভিডিও/ছবি।</p>
+        <div class="grid">
+          {card("Reel", "চালু ✅" if info['enabled'] else "বন্ধ ⛔")}
+          {card("Reel slides", info['count'])}
+          {card("Playing at once", info['wall'])}
+          {card("Pinned", info['pins'])}
+          {card("Total plays", info['plays'])}
+        </div>
+        <div class="card">
+          <h4>সেটিংস</h4>
+          <form method=post action="/admin/reel/save">
+            <div class="chk"><input type=checkbox name=enabled value=1 {'checked' if info['enabled'] else ''} id=on>
+              <label for=on>হোম পেজে রিল দেখাও</label></div>
+            <div class="chk"><input type=checkbox name=autoplay value=1 {'checked' if info['autoplay'] else ''} id=ap>
+              <label for=ap>নিজে থেকেই চালু হবে (মিউট — ব্রাউজারের নিয়ম)</label></div>
+            <div class="chk"><input type=checkbox name=muted value=1 {'checked' if info['muted'] else ''} id=mu>
+              <label for=mu>শুরুতে সাউন্ড বন্ধ রাখো</label></div>
+            <label>রিলে কয়টা মিডিয়া (১–৮)</label>
+            <input name=count type=number min=1 max=8 value="{info['count']}">
+            <label>একসাথে কয়টা অটো-প্লে হবে (ওয়াল, ০ = বন্ধ)</label>
+            <input name=wall type=number min=0 max=8 value="{info['wall']}">
+            <label>মিডিয়া পেজে কতগুলো মিডিয়া (৪–১২০)</label>
+            <input name=gallery type=number min=4 max=120 value="{feed_service.gallery_count()}">
+            <button class="ok">💾 সেভ করুন</button>
+          </form>
+        </div>
+        <div class="card">
+          <h4>এখন যা দেখাচ্ছে ({len(showing)})</h4>
+          <div class="wall">{preview or '<p class="muted">এখনো কিছু নেই — ফ্রি স্টোরে ভিডিও/ছবি যোগ করুন, বা বটে <code>/reel add</code> দিয়ে পিন করুন।</p>'}</div>
+        </div>
+        <h4>📌 পিন করা মিডিয়া</h4>
+        <p class="muted">বটে <code>/reel add</code> দিলে বা ইনবক্সের মিডিয়া পিন করলে এখানে আসে।
+        উপরে/নিচে সাজানো যায়।</p>
+        <table><tr><th>#</th><th>নাম</th><th>ধরন</th><th>যোগ হয়েছে</th><th></th></tr>
+        {rows or '<tr><td colspan=5 class=muted>কোনো পিন নেই</td></tr>'}</table>
+        <div class="row">
+          <a class="btn grey" href="/" target="_blank">🌐 হোম পেজ দেখুন</a>
+          <a class="btn grey" href="/admin/files">📥 ফাইল পেজ</a>
+        </div>
+        """
+        return layout("Home reel", body, "/admin/reel")
+
+    @app.post("/admin/reel/save")
+    async def admin_reel_save(request: Request, count: int = Form(4), gallery: int = Form(36),
+                              wall: int = Form(4), enabled: str = Form(""),
+                              autoplay: str = Form(""), muted: str = Form("")):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        from app.services import settings as settings_service
+        settings_service.set("FEED_ENABLED", "1" if enabled else "0")
+        settings_service.set("FEED_AUTOPLAY", "1" if autoplay else "0")
+        settings_service.set("FEED_MUTED", "1" if muted else "0")
+        settings_service.set("FEED_COUNT", str(max(1, min(8, int(count or 4)))))
+        settings_service.set("FEED_WALL", str(max(0, min(8, int(wall or 0)))))
+        settings_service.set("FEED_GALLERY_COUNT", str(max(4, min(120, int(gallery or 36)))))
+        audit_service.record("reel_saved", ref=f"wall={wall}",
+                             detail=f"autoplay={bool(autoplay)} muted={bool(muted)} "
+                                    f"count={count} gallery={gallery}")
+        return RedirectResponse("/admin/reel?flash=সেভ+হলো", status_code=303)
+
+    @app.post("/admin/reel/up/{pin_id}")
+    async def admin_reel_up(request: Request, pin_id: int):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        db.move_feed_pin(pin_id, -1)
+        return RedirectResponse("/admin/reel?flash=সরানো+হলো", status_code=303)
+
+    @app.post("/admin/reel/down/{pin_id}")
+    async def admin_reel_down(request: Request, pin_id: int):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        db.move_feed_pin(pin_id, 1)
+        return RedirectResponse("/admin/reel?flash=সরানো+হলো", status_code=303)
+
+    @app.post("/admin/reel/delete/{pin_id}")
+    async def admin_reel_delete(request: Request, pin_id: int):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        db.delete_feed_pin(pin_id)
+        return RedirectResponse("/admin/reel?flash=মুছে+ফেলা+হলো", status_code=303)
 
     @app.get("/admin/analytics", response_class=HTMLResponse)
     async def admin_analytics(request: Request, days: int = 14):
@@ -2721,6 +3832,7 @@ def create_app() -> FastAPI:
         label = f"{max_clicks} ক্লিক" if max_clicks else "আনলিমিটেড"
         if per_user:
             label += f" · প্রতি ইউজার {per_user}"
+        audit_service.record("link_created", ref=token, detail=label)
         return RedirectResponse(
             f"/admin/links?flash=🔗+তৈরি:+{label}+·+{token}", status_code=303)
 
@@ -2835,6 +3947,14 @@ def create_app() -> FastAPI:
         note = f'<div class="flash">{esc(flash)}</div>' if flash else ""
         return layout("Self test", note + panels.self_test_body(checks), "/admin/self-test")
 
+    @app.get("/admin/audit", response_class=HTMLResponse)
+    async def admin_audit(request: Request, name: str = "", days: int = 30):
+        """Who did what — the trail an owner needs when several people share the panel."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        return layout("Admin audit", panels.audit_body(name=name, days=days), "/admin/audit")
+
     @app.get("/admin/logs", response_class=HTMLResponse)
     async def admin_logs(request: Request, level: str = "", lines: int = 300):
         blocked = _guard(request)
@@ -2913,6 +4033,10 @@ def main() -> int:
     setup_logging()
     db.bind(cfg.DB_FILE)
     db.migrate_legacy(cfg.LEGACY_DB_FILE)
+    # The website alone must also honour credentials saved from the setup wizard:
+    # without this, `python -m web.dashboard` bounced every admin page to /setup
+    # even though the bot token was already in the database.
+    credentials.load()
     import uvicorn
     log.info("Website on http://%s:%s (password-only admin login enabled)",
              cfg.WEB_HOST, cfg.WEB_PORT)

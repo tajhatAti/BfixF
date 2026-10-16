@@ -1,0 +1,48 @@
+# systemd unit — bot + website as one always-on service (VPS deployment).
+#
+#   sudo cp deploy/bfixf.service /etc/systemd/system/bfixf.service
+#   sudo nano /etc/systemd/system/bfixf.service      # User= / WorkingDirectory= ঠিক করুন
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now bfixf
+#   systemctl status bfixf          # লাইভ অবস্থা
+#   journalctl -u bfixf -f          # লাইভ লগ (ফাইলে: /home/bfixf/BfixF/logs/bot.log)
+#
+# বট আর ওয়েবসাইট একই প্রসেসে চলে (`python main.py`), তাই একটা সার্ভিসই যথেষ্ট।
+[Unit]
+Description=BfixF — Telegram store bot + website
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bfixf
+Group=bfixf
+WorkingDirectory=/home/bfixf/BfixF
+
+# venv রেপো ফোল্ডারেই থাকে (.venv), তাই ডিফল্টভাবে ওটাই ব্যবহার হচ্ছে:
+ExecStart=/home/bfixf/BfixF/.venv/bin/python main.py
+# venv ছাড়া সিস্টেম পাইথন চাইলে উপরের লাইনটি মুছে দিন আর এটা বসান:
+# ExecStart=/usr/bin/python3 main.py
+
+Environment=PYTHONUNBUFFERED=1
+# PORT/WEB_HOST config.env থেকেই আসে; এখানে শুধু দরকার হলে override করুন:
+# Environment=PORT=8080
+# Environment=WEB_HOST=0.0.0.0
+
+Restart=always
+RestartSec=5
+# টেলিগ্রাম কখনো কখনো FloodWait-এ অনেকক্ষণ অপেক্ষা করায় — হত্যা করবেন না।
+TimeoutStopSec=30
+KillSignal=SIGINT
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bfixf
+
+# হালকা নিরাপত্তা (নিজের ফোল্ডার ছাড়া কিছু লিখতে পারবে না)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/home/bfixf/BfixF
+
+[Install]
+WantedBy=multi-user.target

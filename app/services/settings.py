@@ -37,11 +37,12 @@ class Setting:
     key: str
     label: str                        # বাংলা নাম (প্যানেলে যা দেখাবে)
     group: str
-    kind: str = "text"                # text | long | int | float | bool
+    kind: str = "text"                # text | long | int | float | bool | choice
     hint: str = ""
     placeholder: str = ""
     default: Any = ""
     env: str = ""                     # equivalent environment variable name
+    choices: tuple = ()               # for kind="choice": the allowed values
 
 
 @dataclass
@@ -171,8 +172,19 @@ REGISTRY: list[Group] = [
             _s("BROADCAST_REACH_DAYS", "কত দিন সক্রিয় ইউজারকে পাঠাবে", "broadcast",
                kind="int", default=0,
                hint="0 = সব ইউজার (ব্লক করা বাদে)"),
+            _s("BROADCAST_BATCH", "এক ব্যাচে কতজনকে (ফ্লাড এড়াতে)", "broadcast", kind="int",
+               default=25, hint="Telegram-এর সীমা ~৩০ মেসেজ/সেকেন্ড; ২৫ নিরাপদ"),
+            _s("BROADCAST_BATCH_PAUSE", "প্রতি ব্যাচের পরে বিরতি (সেকেন্ড)", "broadcast",
+               kind="float", default=1.0),
+            _s("BROADCAST_ADAPTIVE", "ফ্লাড খেলে নিজে থেকেই ধীরে চলবে", "broadcast",
+               kind="bool", default=True,
+               hint="Telegram 429 দিলে বাকি ব্রডকাস্টের গতি নিজে থেকেই কমানো হয়"),
             _s("BROADCAST_TO_BLOCKED", "ব্লক করা ইউজারকেও আবার চেষ্টা করবে",
                "broadcast", kind="bool", default=False),
+            _s("BROADCAST_BUTTONS_ON", "বাটন কোন মেসেজে বসবে", "broadcast", kind="choice",
+               default="last", choices=("last", "each", "none"),
+               hint="last = শেষ মেসেজে (আগের মতো) · each = প্রতিটি মেসেজে · "
+                    "none = বাটন ছাড়া"),
             _s("DIGEST_ENABLED", "সাপ্তাহিক নতুন-ভিডিও ডাইজেস্ট", "broadcast",
                kind="bool", default=False,
                hint="চালু করলে সপ্তাহে একবার নতুন আপলোড নিজে থেকেই সব ইউজারকে যাবে"),
@@ -246,7 +258,20 @@ REGISTRY: list[Group] = [
             _s("FEED_ENABLED", "হোম পেজে সদ্য যোগ হওয়া ভিডিও (অটো-প্লে)", "site",
                kind="bool", default=True,
                hint="শুধু ফ্রি স্টোরের ভিডিও দেখায়; প্রিমিয়াম স্টোরের ভিডিও কখনো না"),
-            _s("FEED_COUNT", "হোম পেজে কয়টি ভিডিও (১–৬)", "site", kind="int", default=3),
+            _s("FEED_COUNT", "হোম পেজে কয়টি মিডিয়া (১–৮)", "site", kind="int", default=4),
+            _s("FEED_WALL", "একসাথে কয়টি অটো-প্লে হবে (ওয়াল, ০ = বন্ধ)", "site", kind="int",
+               default=4, hint="৩–৪ দিলে হোম পেজে ঠিক ততগুলো ভিডিও একসাথে নিজে নিজেই চলতে থাকে"),
+            _s("FEED_AUTOPLAY", "নিজে থেকেই চালু হবে (মিউট)", "site", kind="bool", default=True,
+               hint="ব্রাউজার শুধু মিউট ভিডিও নিজে চালু করতে দেয় — সাউন্ড বাটন দিয়ে চালু করা যায়"),
+            _s("FEED_MUTED", "শুরুতে সাউন্ড বন্ধ", "site", kind="bool", default=True),
+            _s("FEED_LOOP", "শেষ হলে আবার শুরু (লুপ)", "site", kind="bool", default=True),
+            _s("FEED_GALLERY_COUNT", "মিডিয়া পেজে কয়টি আইটেম", "site", kind="int", default=36),
+            _s("AUTO_STORE_PUBLISH_CHANNEL", "নতুন স্টোর বানালেই আলাদা পাবলিশ চ্যানেল বানাও",
+               "site", kind="bool", default=False,
+               hint="প্রতি স্টোরের ভিডিও আলাদা চ্যানেলে যায়; ক্যাশ চ্যানেল সবসময় নিজে থেকেই তৈরি হয়"),
+            _s("STORAGE_CHANNEL_WARNING", "ক্যাশ চ্যানেল সমস্যা (বট নিজে লিখে রাখে)", "site",
+               kind="long", hint="খালি থাকলে সব ঠিক আছে; কোনো চ্যানেল খুঁজে না পেলে বট "
+                                 "এখানে সমাধান লিখে রাখে"),
             _s("TZ_OFFSET", "টাইমজোন (UTC থেকে ঘণ্টা)", "site", kind="float",
                default=6.0, hint="বাংলাদেশ = 6"),
         ],
@@ -392,6 +417,11 @@ def validate(key: str, raw: Any) -> tuple[bool, Any, str]:
         return True, number, ""
     if item.kind == "bool":
         return True, _coerce(item, value), ""
+    if item.kind == "choice":
+        allowed = tuple(item.choices or ())
+        if value not in allowed:
+            return False, raw, "এই অপশনগুলোর একটি দিন: " + ", ".join(allowed)
+        return True, value, ""
     if item.key == "FORCE_CHANNEL" and value:
         from app.services import forcejoin
         cleaned = forcejoin.normalize(value)

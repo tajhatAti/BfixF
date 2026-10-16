@@ -49,6 +49,11 @@ def admin_panel(admin_id: int, active_store_name: str | None, session_ok: bool,
         Button.inline("🤖 Bot scan", "adm:bscan"),
     ])
     rows.append([
+        Button.inline("📣 দ্রুত ব্রডকাস্ট (/br)", "hint:br"),
+        Button.inline("📥 মিডিয়া ইনবক্স (/bm)", "hint:bm"),
+    ])
+    rows.append([
+        Button.inline("🎞 হোম রিল (/reel)", "hint:reel"),
         Button.inline("👁 User view", "adm:prev"),
         Button.inline("🆘 Help", "adm:help"),
     ])

@@ -142,6 +142,18 @@ CREATE TABLE IF NOT EXISTS bot_chats (
     chat_id INTEGER PRIMARY KEY,
     title   TEXT
 );
+-- Channel/group peers the owner's session (or the bot) has met. Telegram needs the
+-- pair (channel_id, access_hash) exactly like users, and this is what lets the
+-- media-cache channel survive a wiped session: “Could not find the input entity for
+-- PeerChannel(…)” happens when this table has no row yet.
+CREATE TABLE IF NOT EXISTS chat_peers (
+    peer_id     INTEGER PRIMARY KEY,   -- marked id (-100…), as Telegram reports it
+    access_hash INTEGER,
+    title       TEXT DEFAULT '',
+    username    TEXT DEFAULT '',
+    kind        TEXT DEFAULT 'channel',
+    updated_at  REAL
+);
 CREATE INDEX IF NOT EXISTS idx_files_store   ON files(store_id);
 CREATE INDEX IF NOT EXISTS idx_files_code    ON files(code);
 CREATE INDEX IF NOT EXISTS idx_files_created ON files(created_at);
@@ -278,6 +290,34 @@ CREATE TABLE IF NOT EXISTS campaign_items (
 CREATE INDEX IF NOT EXISTS idx_camp_status ON campaigns(status, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_camp_items  ON campaign_items(campaign_id, status);
 
+-- v3.4: a broadcast is not always one message. Every item an admin sent while
+-- drafting (text, photo, video, GIF, document, audio, voice) is one row here and
+-- goes out as its own message — exactly like the original draft.
+CREATE TABLE IF NOT EXISTS campaign_groups (
+    campaign_id INTEGER NOT NULL,
+    idx         INTEGER NOT NULL,
+    kind        TEXT,
+    file_id     TEXT,
+    text        TEXT,
+    media_key   TEXT,
+    parse_mode  TEXT DEFAULT '',
+    created_at  REAL,
+    PRIMARY KEY (campaign_id, idx)
+);
+-- v3.4: reusable “label | url” buttons + a public draft link for each campaign.
+CREATE TABLE IF NOT EXISTS campaign_links (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id INTEGER,
+    token       TEXT UNIQUE,
+    label       TEXT,
+    url         TEXT,
+    kind        TEXT DEFAULT 'button',
+    clicks      INTEGER DEFAULT 0,
+    created_at  REAL
+);
+CREATE INDEX IF NOT EXISTS idx_camp_links ON campaign_links(campaign_id, kind);
+CREATE INDEX IF NOT EXISTS idx_camp_groups ON campaign_groups(campaign_id, idx);
+
 -- ===================== v3: analytics, limited links, per-store force join =====================
 CREATE TABLE IF NOT EXISTS events (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -322,6 +362,66 @@ CREATE TABLE IF NOT EXISTS file_views (
     file_id  INTEGER PRIMARY KEY,
     unique_n INTEGER DEFAULT 0,
     last_ts  REAL
+);
+
+-- ===================== v3.1: media broadcasts, drafts, public reel =====================
+-- Media attached to a broadcast that is *not* one of the store files: the admin
+-- forwards / uploads a video to the bot (or picks one in the website composer) and
+-- the campaign remembers only `(chat_id, msg_id)` — Telegram's own copy is the
+-- storage, so the queue survives a restart without re-uploading anything.
+CREATE TABLE IF NOT EXISTS campaign_media (
+    campaign_id INTEGER NOT NULL,
+    idx         INTEGER NOT NULL,
+    chat_id     INTEGER,
+    msg_id      INTEGER,
+    kind        TEXT DEFAULT 'video',   -- video|photo|audio|document
+    name        TEXT DEFAULT '',
+    item_id     INTEGER DEFAULT 0,      -- inbox (`bc_media`) row, for previews
+    PRIMARY KEY (campaign_id, idx)
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_media ON campaign_media(campaign_id, idx);
+
+-- `/br` drafts: whatever the admin collected (text, buttons, media, options) is
+-- saved here on every step, so a restart, a closed app or a forgotten session
+-- never loses the content.
+CREATE TABLE IF NOT EXISTS br_drafts (
+    admin_id   INTEGER PRIMARY KEY,
+    data       TEXT,
+    updated_at REAL
+);
+
+-- “Media inbox”: videos/photos the owner forwards to the bot for broadcasts that
+-- are not store files (a banner, an announcement video, a promo clip…). The
+-- website's broadcast studio can attach any of them to a campaign.
+CREATE TABLE IF NOT EXISTS bc_media (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id  INTEGER,
+    msg_id   INTEGER,
+    kind     TEXT DEFAULT 'video',
+    name     TEXT DEFAULT '',
+    size     INTEGER DEFAULT 0,
+    added_at REAL,
+    used     INTEGER DEFAULT 0
+);
+
+-- Hand-picked media for the public auto-playing reel (home page). Pinned items
+-- come first, then the newest free videos.
+CREATE TABLE IF NOT EXISTS feed_pins (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id  INTEGER,
+    msg_id   INTEGER,
+    kind     TEXT DEFAULT 'video',
+    title    TEXT DEFAULT '',
+    position INTEGER DEFAULT 0,
+    added_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_feed_pins ON feed_pins(position, id);
+
+-- Play counter for the public reel — "how many people actually watched".
+CREATE TABLE IF NOT EXISTS feed_plays (
+    item    TEXT PRIMARY KEY,           -- file:<id> / pin:<id>
+    plays   INTEGER DEFAULT 0,
+    last_ts REAL
 );
 """
 
@@ -385,6 +485,31 @@ class Database:
             ("stores", "publish_channel_title", "ALTER TABLE stores ADD COLUMN publish_channel_title TEXT DEFAULT ''"),
             ("stores", "publish_channel_link", "ALTER TABLE stores ADD COLUMN publish_channel_link TEXT DEFAULT ''"),
             ("stores", "auto_post_enabled", "ALTER TABLE stores ADD COLUMN auto_post_enabled INTEGER DEFAULT 0"),
+            # ------------------------------------------------ v3.1 broadcast reach
+            # Telegram needs (user_id + access_hash) to send to somebody. Telethon
+            # keeps that in the session file only; hosting panels wipe the disk, so
+            # the hash is cached in the database and reused forever after.
+            ("users", "access_hash", "ALTER TABLE users ADD COLUMN access_hash INTEGER"),
+            ("users", "reachable", "ALTER TABLE users ADD COLUMN reachable INTEGER DEFAULT 1"),
+            ("users", "last_error", "ALTER TABLE users ADD COLUMN last_error TEXT DEFAULT ''"),
+            ("campaigns", "silent", "ALTER TABLE campaigns ADD COLUMN silent INTEGER DEFAULT 0"),
+            ("campaigns", "protect", "ALTER TABLE campaigns ADD COLUMN protect INTEGER DEFAULT 1"),
+            ("campaigns", "origin", "ALTER TABLE campaigns ADD COLUMN origin TEXT DEFAULT 'panel'"),
+            # The campaign page shows the hand-picked media as tiles; the inbox id
+            # links each tile to `/inbox/<id>` so the owner can check the actual file.
+            ("campaign_media", "item_id",
+             "ALTER TABLE campaign_media ADD COLUMN item_id INTEGER DEFAULT 0"),
+            # Slow mode: spread a big list over N minutes instead of one burst
+            # (Telegram allows ~30 messages/second in total).
+            ("campaigns", "pause_seconds",
+             "ALTER TABLE campaigns ADD COLUMN pause_seconds REAL DEFAULT 0"),
+            # -------------------------------------------- v3.4 media-group drafts
+            # The `/br` studio can draft several items (text, photo, video, GIF,
+            # file, audio, voice — one admin message each) and send them exactly
+            # like that. `campaign_groups` keeps that list; `items` (below) keeps
+            # an older single-file list alive for existing campaigns.
+            ("campaign_items", "draft_id",
+             "ALTER TABLE campaign_items ADD COLUMN draft_id INTEGER DEFAULT 0"),
         ):
             columns = {row["name"] for row in
                        self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -446,6 +571,88 @@ class Database:
     def user(self, user_id: int) -> dict | None:
         return self._dict(self._one("SELECT * FROM users WHERE user_id = ?", (user_id,)))
 
+    # ------------------------------------------------- Telegram peer (access hash)
+    # A bot can only message a user it knows the `access_hash` of. Telethon caches
+    # that inside the .session file; when the file is gone (new host, wiped disk,
+    # "session created empty") every broadcast silently fails with
+    # “Could not find the input entity for PeerUser”. Remembering the hash in the
+    # database is what makes `/br` keep working after a restart.
+    # -------------------------------------------------------- channel/chat peers
+    def set_chat_peer(self, peer_id: int, access_hash: int | None,
+                      title: str | None = None, username: str | None = None,
+                      kind: str = "channel") -> None:
+        """Remember a channel/group's access hash (see `app/services/peers.py`)."""
+        self._run(
+            "INSERT INTO chat_peers(peer_id, access_hash, title, username, kind, updated_at)"
+            " VALUES(?,?,?,?,?,?)"
+            " ON CONFLICT(peer_id) DO UPDATE SET"
+            " access_hash = COALESCE(excluded.access_hash, access_hash),"
+            " title = COALESCE(NULLIF(excluded.title, ''), title),"
+            " username = COALESCE(NULLIF(excluded.username, ''), username),"
+            " kind = excluded.kind, updated_at = excluded.updated_at",
+            (int(peer_id), access_hash, (title or "")[:200], (username or "")[:64],
+             (kind or "channel")[:16], time.time()),
+        )
+
+    def chat_peer(self, peer_id: int) -> dict | None:
+        return self._dict(self._one("SELECT * FROM chat_peers WHERE peer_id = ?",
+                                    (int(peer_id),)))
+
+    def chat_peers(self, limit: int = 200) -> list[dict]:
+        return [dict(r) for r in self._q(
+            "SELECT * FROM chat_peers ORDER BY updated_at DESC LIMIT ?", (int(limit),))]
+
+    def set_user_peer(self, user_id: int, access_hash: int | None,
+                      name: str | None = None, username: str | None = None) -> None:
+        user_id = int(user_id)
+        now = time.time()
+        row = self._one("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+        if row is None:
+            self._run(
+                "INSERT INTO users(user_id, name, username, joined_at, last_seen,"
+                " access_hash, reachable) VALUES(?,?,?,?,?,?,1)",
+                (user_id, name or "Unknown", username, now, now, access_hash),
+            )
+            return
+        self._run(
+            "UPDATE users SET access_hash = COALESCE(?, access_hash),"
+            " name = COALESCE(?, name), username = COALESCE(?, username),"
+            " last_seen = ?, reachable = 1, last_error = '' WHERE user_id = ?",
+            (access_hash, name, username, now, user_id),
+        )
+
+    def user_peer(self, user_id: int) -> dict | None:
+        """{access_hash, reachable, name, username} or None."""
+        row = self._one(
+            "SELECT access_hash, reachable, name, username, last_error FROM users"
+            " WHERE user_id = ?", (int(user_id),))
+        return self._dict(row)
+
+    def mark_unreachable(self, user_id: int, reason: str = "") -> None:
+        """Remember why a user could not be reached, so the panel can explain it."""
+        try:
+            self._run("UPDATE users SET reachable = 0, last_error = ? WHERE user_id = ?",
+                      ((reason or "")[:200], int(user_id)))
+        except Exception:
+            pass
+
+    def mark_reachable(self, user_id: int) -> None:
+        try:
+            self._run("UPDATE users SET reachable = 1, last_error = '' WHERE user_id = ?",
+                      (int(user_id),))
+        except Exception:
+            pass
+
+    def reachability(self) -> dict:
+        """Small summary for the dashboard: how many users we can actually reach."""
+        row = self._one(
+            "SELECT COUNT(*) AS total,"
+            " SUM(CASE WHEN COALESCE(reachable,1) = 1 THEN 1 ELSE 0 END) AS reachable,"
+            " SUM(CASE WHEN access_hash IS NULL THEN 1 ELSE 0 END) AS missing_hash"
+            " FROM users")
+        return {"total": int(row["total"] or 0), "reachable": int(row["reachable"] or 0),
+                "missing_hash": int(row["missing_hash"] or 0)}
+
     def delete_user(self, user_id: int) -> bool:
         """Remove one user and every trace of them (grants, orders, events…).
 
@@ -459,7 +666,7 @@ class Database:
             ("events", "user_id"), ("file_views", "user_id"), ("favorites", "user_id"),
             ("drip_subs", "user_id"), ("drip_sent", "user_id"), ("link_uses", "user_id"),
             ("join_prompts", "user_id"), ("tickets", "user_id"), ("referrals", "user_id"),
-            ("requests", "user_id"), ("bans", "user_id"),
+            ("requests", "user_id"), ("banned", "user_id"),
         ):
             try:
                 self._run(f"DELETE FROM {table} WHERE {column} = ?", (user_id,))
@@ -504,6 +711,30 @@ class Database:
     def user_count(self) -> int:
         return self._one("SELECT COUNT(*) AS c FROM users")["c"]
 
+    def all_users_brief(self) -> list[dict]:
+        """`user_id, username, name` for everybody — used by broadcast reports.
+
+        A report lists thousands of rows; returning just these three columns keeps
+        it cheap instead of loading every user record with all its settings.
+        """
+        return [dict(r) for r in self._q(
+            "SELECT user_id, COALESCE(username, '') AS username, COALESCE(name, '') AS name"
+            " FROM users ORDER BY user_id")]
+
+    def users_brief(self, user_ids: Iterable[int]) -> dict[int, dict]:
+        """The same, but only for the given ids (a report often needs a fraction)."""
+        wanted = [int(uid) for uid in dict.fromkeys(user_ids) if uid]
+        out: dict[int, dict] = {}
+        for start in range(0, len(wanted), 400):          # stay under SQLite's limit
+            chunk = wanted[start:start + 400]
+            marks = ",".join("?" for _ in chunk)
+            for row in self._q(
+                    f"SELECT user_id, COALESCE(username, '') AS username,"
+                    f" COALESCE(name, '') AS name FROM users WHERE user_id IN ({marks})",
+                    tuple(chunk)):
+                out[int(row["user_id"])] = dict(row)
+        return out
+
     # ------------------------------------------------------------ admin state
     def active_store_id(self, admin_id: int) -> int | None:
         row = self._one("SELECT active_store_id FROM admin_state WHERE admin_id = ?", (admin_id,))
@@ -536,9 +767,15 @@ class Database:
             "VALUES(?, ?, ?, ?, 1)",
             (admin_id, name, self._free_slug(name), time.time()),
         )
-        return dict(self._one(
+        store = dict(self._one(
             "SELECT * FROM stores WHERE admin_id = ? AND name = ?", (admin_id, name)
         ))
+        # Audit trail (services/audit) reads these names straight off `events`.
+        # NOTE: audit rows keep `store_id` empty on purpose — the funnel/analytics
+        # queries count any event that carries a store id, and an admin action is
+        # not a visitor walking through the funnel. The store lives in `ref`.
+        self.log_event("store_created", admin_id, None, None, f"s{store['id']} {name}")
+        return store
 
     def store(self, store_id: int) -> dict | None:
         return self._dict(self._one("SELECT * FROM stores WHERE id = ?", (store_id,)))
@@ -602,6 +839,7 @@ class Database:
         self._run("DELETE FROM referral_cfg WHERE store_id = ?", (store_id,))
         self._run("DELETE FROM admin_state WHERE active_store_id = ?", (store_id,))
         self._run("DELETE FROM stores WHERE id = ?", (store_id,))
+        self.log_event("store_deleted", None, None, None, f"s{store_id}")
 
     def store_stats(self, store_id: int) -> dict:
         row = self._one(
@@ -699,6 +937,36 @@ class Database:
             "LEFT JOIN stores s ON s.id = f.store_id "
             "ORDER BY f.views DESC LIMIT ?", (limit,)
         )]
+
+    def dead_files(self, days: int = 30, limit: int = 40) -> list[dict]:
+        """Files nobody watched at all in the window — the “এই ফাইলগুলো বেকার” report.
+
+        A file counts as dead when it has zero `deliver` events since `days` ago
+        *and* zero lifetime views, so brand-new uploads are not accused of being
+        unwanted before anyone has had a chance to see them.
+        """
+        since = time.time() - max(1, int(days)) * 86400
+        return [dict(r) for r in self._q(
+            "SELECT f.*, s.name AS store_name, "
+            "  (SELECT COUNT(*) FROM events e WHERE e.file_id = f.id "
+            "     AND e.name = 'deliver' AND e.ts >= ?) AS recent_delivers, "
+            "  (SELECT COUNT(*) FROM events e WHERE e.file_id = f.id "
+            "     AND e.name = 'open_store') AS store_opens "
+            "FROM files f LEFT JOIN stores s ON s.id = f.store_id "
+            "WHERE COALESCE(f.views, 0) = 0 "
+            "ORDER BY f.created_at ASC LIMIT ?", (since, max(1, int(limit))))]
+
+    def conversion_rate(self, days: int = 30) -> dict:
+        """Free → paid conversion: how many people who came actually bought."""
+        since = time.time() - max(1, int(days)) * 86400
+        came = self._one("SELECT COUNT(DISTINCT user_id) AS c FROM events "
+                         "WHERE ts >= ? AND name IN ('start','open_store')", (since,))
+        paid = self._one("SELECT COUNT(DISTINCT user_id) AS c FROM events "
+                         "WHERE ts >= ? AND name = 'paid'", (since,))
+        came_n = int((came or {"c": 0})["c"] or 0)
+        paid_n = int((paid or {"c": 0})["c"] or 0)
+        return {"came": came_n, "paid": paid_n,
+                "rate": (paid_n / came_n * 100) if came_n else 0.0}
 
     def store_id_of_file(self, file_id: int) -> int | None:
         row = self._one("SELECT store_id FROM files WHERE id = ?", (file_id,))
@@ -868,6 +1136,9 @@ class Database:
             "source = excluded.source",
             (store_id, user_id, expires_at, time.time(), source),
         )
+        # “কে এই অ্যাক্সেসটা দিল” — shown on /admin/audit.
+        self.log_event("grant", user_id, None, None, f"s{store_id} {source}",
+                       "lifetime" if expires_at is None else "expires")
 
     def extend_grant(self, store_id: int, user_id: int, days: int, source: str = "referral") -> float:
         """Add days on top of a still valid grant (instead of overwriting it)."""
@@ -884,8 +1155,9 @@ class Database:
         self.grant(store_id, user_id, new_expiry, source)
         return new_expiry
 
-    def revoke(self, store_id: int, user_id: int) -> None:
+    def revoke(self, store_id: int, user_id: int, source: str = "admin") -> None:
         self._run("DELETE FROM grants WHERE store_id = ? AND user_id = ?", (store_id, user_id))
+        self.log_event("revoke", user_id, None, None, f"s{store_id} {source}")
 
     def grant_row(self, store_id: int, user_id: int) -> dict | None:
         return self._dict(self._one(
@@ -1402,11 +1674,14 @@ class Database:
             "ON CONFLICT(user_id) DO UPDATE SET reason = excluded.reason, banned_at = excluded.banned_at, banned_by = excluded.banned_by",
             (user_id, reason, time.time(), banned_by),
         )
+        self.log_event("user_banned", user_id, None, None, reason or "admin",
+                       f"by {banned_by}")
         # Also revoke all grants
         self._run("DELETE FROM grants WHERE user_id = ?", (user_id,))
 
     def unban_user(self, user_id: int) -> None:
         self._run("DELETE FROM banned WHERE user_id = ?", (user_id,))
+        self.log_event("user_unbanned", user_id, None, None, "admin")
 
     def is_banned(self, user_id: int) -> bool:
         return bool(self._one("SELECT 1 FROM banned WHERE user_id = ?", (user_id,)))
@@ -1682,6 +1957,36 @@ class Database:
             "AND f.mirror_msg IS NOT NULL AND f.mirror_msg != 0 "
             "ORDER BY f.id DESC LIMIT ?", (limit,))]
 
+    def recent_public_media(self, limit: int = 8) -> list[dict]:
+        """Video *and* photos of free stores, with or without a mirror copy.
+
+        The public reel used to require `mirror_msg` (a bot-side copy created by the
+        media cache), so a fresh install showed an empty page even though the store
+        was full of videos. The feed service now resolves the source itself, so the
+        query only needs files the bot is allowed to stream.
+        """
+        return [dict(r) for r in self._q(
+            "SELECT f.*, s.name AS store_name, s.slug AS store_slug,"
+            " s.is_premium AS store_premium FROM files f JOIN stores s ON s.id = f.store_id "
+            "WHERE s.is_premium = 0 AND f.kind IN ('Video', 'Photo') "
+            "AND (f.locked IS NULL OR f.locked = 0) "
+            "AND f.chat_id IS NOT NULL AND f.msg_id IS NOT NULL "
+            "ORDER BY f.id DESC LIMIT ?", (int(limit),))]
+
+    def public_gallery(self, limit: int = 60, kind: str = "") -> list[dict]:
+        """Everything a visitor may browse (free stores only) — used by /watch."""
+        sql = ("SELECT f.*, s.name AS store_name, s.slug AS store_slug"
+               " FROM files f JOIN stores s ON s.id = f.store_id"
+               " WHERE s.is_premium = 0 AND f.kind IN ('Video', 'Photo', 'Audio')"
+               " AND (f.locked IS NULL OR f.locked = 0)")
+        params: list[Any] = []
+        if kind:
+            sql += " AND f.kind = ?"
+            params.append(kind)
+        sql += " ORDER BY f.id DESC LIMIT ?"
+        params.append(int(limit))
+        return [dict(r) for r in self._q(sql, params)]
+
     def missing_mirrors(self, limit: int = 200) -> list[dict]:
         return [dict(r) for r in self._q(
             "SELECT * FROM files WHERE (mirror_msg IS NULL OR mirror_msg = 0) ORDER BY id LIMIT ?",
@@ -1749,23 +2054,223 @@ class Database:
     # up exactly where it stopped.
     CAMPAIGN_FIELDS = {"title", "text", "files", "audience", "status", "total",
                        "sent", "failed", "blocked", "scheduled_at", "started_at",
-                       "finished_at", "last_error"}
+                       "finished_at", "last_error", "silent", "protect", "origin"}
 
     def create_campaign(self, admin_id: int, *, title: str = "", text: str = "",
                         files: list[int] | None = None, audience: str = "all",
                         status: str = "draft", scheduled_at: float | None = None,
                         buttons: str = "", slug: str = "",
-                        media_caption: str = "above", online_button: int | None = None) -> int:
+                        media_caption: str = "above", online_button: int | None = None,
+                        silent: int = 0, protect: int = 1, origin: str = "panel",
+                        media: list[dict] | None = None,
+                        pause_seconds: float = 0.0) -> int:
         cur = self._run(
             "INSERT INTO campaigns(admin_id, title, text, files, audience, status,"
-            " total, scheduled_at, created_at, buttons, slug, media_caption, online_button)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " total, scheduled_at, created_at, buttons, slug, media_caption, online_button,"
+            " silent, protect, origin, pause_seconds)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (admin_id, title or "", text or "", json.dumps(files or []),
              audience, status, 0, scheduled_at, time.time(),
              buttons or "", slug or "", media_caption or "above",
-             None if online_button is None else (1 if online_button else 0)),
+             None if online_button is None else (1 if online_button else 0),
+             1 if silent else 0, 1 if protect else 0, origin or "panel",
+             float(pause_seconds or 0.0)),
         )
+        campaign_id = int(cur.lastrowid)
+        if media:
+            self.add_campaign_media(campaign_id, media)
+        return campaign_id
+
+    # ------------------------------------------------- uploaded broadcast media
+    def add_campaign_media(self, campaign_id: int, items: list[dict]) -> int:
+        """Remember `(chat_id, msg_id)` pairs that go out with this campaign."""
+        added = 0
+        for idx, item in enumerate(items or []):
+            chat_id = item.get("chat_id") or item.get("chat") or 0
+            msg_id = item.get("msg_id") or item.get("msg") or 0
+            if not chat_id or not msg_id:
+                continue
+            item_id = int(item.get("item_id") or 0)
+            if not item_id:
+                try:
+                    item_id = self.bc_media_id_for(chat_id, msg_id)
+                except Exception:
+                    item_id = 0
+            self._run(
+                "INSERT OR REPLACE INTO campaign_media"
+                "(campaign_id, idx, chat_id, msg_id, kind, name, item_id) VALUES(?,?,?,?,?,?,?)",
+                (int(campaign_id), int(item.get("idx", idx)), int(chat_id), int(msg_id),
+                 (item.get("kind") or "video")[:24], (item.get("name") or "")[:200],
+                 item_id))
+            added += 1
+        return added
+
+    def campaign_media(self, campaign_id: int) -> list[dict]:
+        return [dict(r) for r in self._q(
+            "SELECT * FROM campaign_media WHERE campaign_id = ? ORDER BY idx",
+            (int(campaign_id),))]
+
+    # ------------------------------------------------- multi-item draft groups
+    # Ported from the standalone `broadcast.py` archive: a draft is a *list* of
+    # messages („➕ Added #3“). Storing the list makes `/send` reproduce the draft
+    # exactly — several media in one go instead of only one file per campaign.
+    def set_campaign_groups(self, campaign_id: int, items: list[dict]) -> int:
+        """Replace the draft list of a campaign (ordered, 1-based idx)."""
+        self._run("DELETE FROM campaign_groups WHERE campaign_id = ?", (int(campaign_id),))
+        now = time.time()
+        added = 0
+        for idx, item in enumerate(items or []):
+            if not item:
+                continue
+            kind = str(item.get("kind") or "text")[:16]
+            text = item.get("text") or ""
+            file_id = item.get("file_id") or ""
+            media_key = str(item.get("media_key") or "")
+            # A media item may carry no caption at all — the pointer is the content,
+            # so “no text and no file id” is not an empty item when media_key is set.
+            if not text and not file_id and not media_key:
+                continue
+            self._run(
+                "INSERT OR REPLACE INTO campaign_groups"
+                "(campaign_id, idx, kind, file_id, text, media_key, parse_mode, created_at)"
+                " VALUES(?,?,?,?,?,?,?,?)",
+                (int(campaign_id), int(item.get("idx", idx)), kind, str(file_id),
+                 text, media_key, str(item.get("parse_mode") or ""), now),
+            )
+            added += 1
+        return added
+
+    def campaign_groups(self, campaign_id: int) -> list[dict]:
+        return [dict(r) for r in self._q(
+            "SELECT * FROM campaign_groups WHERE campaign_id = ? ORDER BY idx",
+            (int(campaign_id),))]
+
+    def count_campaign_groups(self, campaign_id: int) -> int:
+        row = self._one("SELECT COUNT(*) AS n FROM campaign_groups WHERE campaign_id = ?",
+                        (int(campaign_id),))
+        return int(row["n"] if row else 0)
+
+    # ------------------------------------------------ rich draft links (buttons)
+    def add_campaign_link(self, campaign_id: int, token: str, *, label: str = "",
+                          url: str = "", kind: str = "button") -> int:
+        cur = self._run(
+            "INSERT OR REPLACE INTO campaign_links(campaign_id, token, label, url, kind,"
+            " clicks, created_at) VALUES(?,?,?,?,?, COALESCE((SELECT clicks FROM"
+            " campaign_links WHERE token = ?), 0), ?)",
+            (int(campaign_id), token, label or "", url or "", kind or "button", token,
+             time.time()),
+        )
+        return int(cur.lastrowid or 0)
+
+    def campaign_links(self, campaign_id: int, kind: str | None = "button") -> list[dict]:
+        sql = "SELECT * FROM campaign_links WHERE campaign_id = ?"
+        params: list[Any] = [int(campaign_id)]
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        sql += " ORDER BY id"
+        return [dict(r) for r in self._q(sql, params)]
+
+    def campaign_by_link(self, token: str) -> dict | None:
+        row = self._one("SELECT * FROM campaign_links WHERE token = ?", (str(token),))
+        if row is None:
+            return None
+        return self.campaign(int(row["campaign_id"]))
+
+    def hit_campaign_link(self, token: str) -> int:
+        self._run("UPDATE campaign_links SET clicks = clicks + 1 WHERE token = ?", (str(token),))
+        row = self._one("SELECT clicks FROM campaign_links WHERE token = ?", (str(token),))
+        return int(row["clicks"] if row else 0)
+
+    def clear_campaign_media(self, campaign_id: int) -> None:
+        self._run("DELETE FROM campaign_media WHERE campaign_id = ?", (int(campaign_id),))
+
+    # ------------------------------------------------------------ `/br` drafts
+    def save_br_draft(self, admin_id: int, data: str) -> None:
+        self._run("INSERT INTO br_drafts(admin_id, data, updated_at) VALUES(?,?,?)"
+                  " ON CONFLICT(admin_id) DO UPDATE SET data = excluded.data,"
+                  " updated_at = excluded.updated_at",
+                  (int(admin_id), data, time.time()))
+
+    def br_draft(self, admin_id: int) -> dict | None:
+        return self._dict(self._one("SELECT * FROM br_drafts WHERE admin_id = ?",
+                                    (int(admin_id),)))
+
+    def clear_br_draft(self, admin_id: int) -> None:
+        self._run("DELETE FROM br_drafts WHERE admin_id = ?", (int(admin_id),))
+
+    # --------------------------------------------------- broadcast media inbox
+    def add_bc_media(self, chat_id: int, msg_id: int, kind: str = "video",
+                     name: str = "", size: int = 0) -> int:
+        existing = self._one(
+            "SELECT id FROM bc_media WHERE chat_id = ? AND msg_id = ?",
+            (int(chat_id), int(msg_id)))
+        if existing:
+            return int(existing["id"])
+        cur = self._run(
+            "INSERT INTO bc_media(chat_id, msg_id, kind, name, size, added_at)"
+            " VALUES(?,?,?,?,?,?)",
+            (int(chat_id), int(msg_id), (kind or "video")[:24], (name or "")[:200],
+             int(size or 0), time.time()))
         return int(cur.lastrowid)
+
+    def bc_media_items(self, limit: int = 40) -> list[dict]:
+        return [dict(r) for r in self._q(
+            "SELECT * FROM bc_media ORDER BY id DESC LIMIT ?", (int(limit),))]
+
+    def bc_media_item(self, item_id: int) -> dict | None:
+        return self._dict(self._one("SELECT * FROM bc_media WHERE id = ?", (int(item_id),)))
+
+    def bc_media_id_for(self, chat_id: int, msg_id: int) -> int:
+        """Inbox id of one (chat, message) pair — 0 when it is not in the inbox.
+
+        Used to link a campaign's attached media back to `/inbox/<id>`; the old
+        “scan the first 60 rows” trick silently produced `/inbox/0` links for
+        anything added earlier.
+        """
+        row = self._one("SELECT id FROM bc_media WHERE chat_id = ? AND msg_id = ?"
+                        " ORDER BY id LIMIT 1", (int(chat_id), int(msg_id)))
+        return int(row["id"]) if row else 0
+
+    def delete_bc_media(self, item_id: int) -> None:
+        self._run("DELETE FROM bc_media WHERE id = ?", (int(item_id),))
+
+    def touch_bc_media(self, item_id: int) -> None:
+        self._run("UPDATE bc_media SET used = used + 1 WHERE id = ?", (int(item_id),))
+
+    # ------------------------------------------------- public reel (home page)
+    def add_feed_pin(self, chat_id: int, msg_id: int, kind: str = "video",
+                     title: str = "") -> int:
+        row = self._one("SELECT COALESCE(MAX(position), 0) AS p FROM feed_pins")
+        cur = self._run(
+            "INSERT INTO feed_pins(chat_id, msg_id, kind, title, position, added_at)"
+            " VALUES(?,?,?,?,?,?)",
+            (int(chat_id), int(msg_id), (kind or "video")[:24], (title or "")[:200],
+             int(row["p"] or 0) + 1, time.time()))
+        return int(cur.lastrowid)
+
+    def feed_pins(self, limit: int = 12) -> list[dict]:
+        return [dict(r) for r in self._q(
+            "SELECT * FROM feed_pins ORDER BY position, id DESC LIMIT ?", (int(limit),))]
+
+    def delete_feed_pin(self, pin_id: int) -> None:
+        self._run("DELETE FROM feed_pins WHERE id = ?", (int(pin_id),))
+
+    def move_feed_pin(self, pin_id: int, delta: int) -> None:
+        row = self._one("SELECT position FROM feed_pins WHERE id = ?", (int(pin_id),))
+        if row is None:
+            return
+        self._run("UPDATE feed_pins SET position = ? WHERE id = ?",
+                  (max(0, int(row["position"] or 0) + int(delta)), int(pin_id)))
+
+    def bump_feed_play(self, item: str) -> None:
+        self._run("INSERT INTO feed_plays(item, plays, last_ts) VALUES(?, 1, ?)"
+                  " ON CONFLICT(item) DO UPDATE SET plays = plays + 1,"
+                  " last_ts = excluded.last_ts", (item[:80], time.time()))
+
+    def feed_play_counts(self) -> dict[str, int]:
+        return {r["item"]: int(r["plays"] or 0) for r in
+                self._q("SELECT item, plays FROM feed_plays")}
 
     def campaign(self, campaign_id: int) -> dict | None:
         row = self._dict(self._one("SELECT * FROM campaigns WHERE id = ?", (campaign_id,)))
@@ -1773,6 +2278,10 @@ class Database:
             return None
         row["file_ids"] = _json_int_list(row.get("files"))
         return row
+
+    def campaign_count(self) -> int:
+        row = self._one("SELECT COUNT(*) AS c FROM campaigns")
+        return int(row["c"] or 0)
 
     def campaigns(self, limit: int = 50, status: str | None = None,
                   admin_id: int | None = None) -> list[dict]:

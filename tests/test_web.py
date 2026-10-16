@@ -13,7 +13,7 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient      # noqa: E402
 
 from app import config as cfg                  # noqa: E402
-from app.services import billing, broadcast    # noqa: E402
+from app.services import billing, broadcast, settings  # noqa: E402
 from app.storage import db                     # noqa: E402
 from tests.test_flows import ADMIN_ID, USER_ID  # noqa: E402
 
@@ -952,3 +952,209 @@ def test_emergency_actions_flip_the_switches(client):
     # no login, no switch
     denied = client.post("/admin/emergency/maintenance", data={"value": "1"}, follow_redirects=False)
     assert denied.status_code == 303 and settings.get_bool("MAINTENANCE_MODE", False) is False
+
+
+# ------------------------------------------------------ admin shell & panel UI
+def test_the_sidebar_groups_every_admin_page(client):
+    """The panel is organised in collapsible groups — no page without a link."""
+    page = client.get("/admin", headers=_auth()).text
+    for href in ("/admin/stores", "/admin/files", "/admin/channels", "/admin/reel",
+                 "/admin/broadcast", "/admin/users", "/admin/orders", "/admin/links",
+                 "/admin/analytics", "/admin/self-test", "/admin/logs", "/admin/download",
+                 "/admin/settings", "/admin/texts", "/admin/security", "/admin/session",
+                 "/admin/emergency"):
+        assert f'href="{href.lstrip("/")}"' in page or f'href="{href}"' in page, href
+    assert page.count("navgrp") >= 5, "the groups must be collapsible"
+    assert "open" in page, "the group holding the current page is expanded"
+
+
+def test_the_quick_actions_are_on_the_overview(client):
+    page = client.get("/admin", headers=_auth()).text
+    assert "quick" in page
+    for label in ("Create store", "Videos &amp; files", "New broadcast", "Home page reel"):
+        assert label in page, label
+
+
+def test_the_panel_theme_is_monochrome(client):
+    """Nothing in the workspace theme paints with a colour: black, white, grey."""
+    from web import adminui
+    css = adminui.THEME_CSS
+    assert "--accent:#111111" in css
+    assert "--rail:#0b0b0b" in css               # the black rail
+    assert "linear-gradient(" not in css and "radial-gradient(" not in css
+    # The only colours allowed are the two status colours (a real red for danger,
+    # a green for “done”) — the whole layout itself stays black and white.
+    for forbidden in ("#245bd6", "#0f766e", "#172033", "tomato"):
+        assert forbidden not in css
+
+
+def test_the_panel_shell_has_the_new_navigation_pieces(client):
+    """The redesigned shell: breadcrumb, palette trigger, rail footer."""
+    page = client.get("/admin", headers=_auth()).text
+    assert 'class="crumbs"' in page and "Overview" in page
+    assert 'id="palette-open"' in page            # Ctrl+K command palette
+    assert 'id="palette"' in page
+    assert "rail-foot" in page
+    assert "control room" in page
+
+
+def test_the_overview_explains_broadcast_reachability(client):
+    db.touch_user(USER_ID, "Reachable", "reach")
+    db.touch_user(USER_ID + 1, "Silent", None)
+    db.set_user_peer(USER_ID, 123456789)
+    page = client.get("/admin", headers=_auth()).text
+    assert "ইউজারের কাছে ব্রডকাস্ট পৌঁছাবে" in page or "সব" in page
+
+
+# ------------------------------------------------- per-store channel dashboard
+def test_the_channels_page_lists_one_row_per_store(client):
+    store = db.create_store(ADMIN_ID, "Alpha store")
+    db.create_store(ADMIN_ID, "Beta store")
+    db.set_meta(f"store_cache_channel:{store['id']}", "-1001900000001")
+    db.set_chat_peer(-1001900000001, 987, "Alpha - media")
+
+    page = client.get("/admin/channels", headers=_auth()).text
+    assert "প্রতি স্টোরের আলাদা চ্যানেল" in page
+    assert "Alpha store" in page and "Beta store" in page
+    assert "-1001900000001" in page
+    # links are base-relative on purpose (see app/services/basepath.py)
+    assert "channels/store/" in page and "cache/reset" in page
+
+
+def test_resetting_a_store_cache_channel_forgets_the_pair(client):
+    store = db.create_store(ADMIN_ID, "Reset me")
+    db.set_meta(f"store_cache_channel:{store['id']}", "-1001900000009")
+
+    response = client.post(f"/admin/channels/store/{store['id']}/cache/reset",
+                           headers=_auth(), follow_redirects=False)
+    assert response.status_code == 303
+    assert db.get_meta(f"store_cache_channel:{store['id']}", "") == ""
+
+
+def test_the_cache_warning_is_shown_on_the_channels_page(client):
+    settings.set("STORAGE_CHANNEL_WARNING", "ক্যাশ চ্যানেল পাওয়া যাচ্ছে না — STORAGE_CHANNEL দিন")
+    page = client.get("/admin/channels", headers=_auth()).text
+    assert "STORAGE_CHANNEL দিন" in page
+    settings.set("STORAGE_CHANNEL_WARNING", "")
+
+
+def test_the_watch_hero_follows_the_reel_settings(client):
+    """Hero playback is not hard-coded — the reel page decides autoplay/muted/loop."""
+    store = _store("Watcher")
+    db.add_file(store["id"], "Vid", "Video", -100, 7, size=3_000_000)
+    settings._cache.clear()
+    settings.set("FEED_AUTOPLAY", "1")
+    settings.set("FEED_MUTED", "1")
+    settings.set("FEED_LOOP", "1")
+    on = client.get("/watch").text
+    assert "autoplay" in on and "muted" in on and "loop" in on
+
+    settings.set("FEED_AUTOPLAY", "0")
+    settings.set("FEED_MUTED", "0")
+    settings.set("FEED_LOOP", "0")
+    off = client.get("/watch").text
+    assert '<video id="hero-media" controls playsinline' in off
+    assert "autoplay" not in off.split("hero-media")[1][:120]
+
+
+def test_deleting_a_user_removes_the_ban_too(client):
+    _store("Cleanup")
+    db.ban_user(USER_ID, "spam", ADMIN_ID)
+    db.touch_user(USER_ID, "spam", "sp")
+    assert db.is_banned(USER_ID)
+    assert db.delete_user(USER_ID) is True
+    assert db.is_banned(USER_ID) is False
+
+
+def test_the_studio_multi_message_mode_stores_the_whole_plan(client):
+    """“বহু-মেসেজ” = text first, then one separate message per attachment."""
+    store = _store()
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    file_id = db.add_file(store["id"], "Promo", "Video", -100, 9, size=1_000)
+
+    response = client.post(
+        "/admin/broadcast/new",
+        data={"audience": "all", "mode": "multi", "action": "draft", "file_id": file_id,
+              "text": "প্রথম মেসেজ", "captions": "ছবিটার ক্যাপশন"},
+        headers=_auth(), follow_redirects=False)
+    assert response.status_code == 303
+    campaign = db.campaigns(limit=1)[0]
+    plan = db.campaign_groups(campaign["id"])
+    assert [row["kind"] for row in plan][0] == "text"
+    assert plan[0]["text"].strip() == "প্রথম মেসেজ"
+    assert int(plan[1]["file_id"]) == file_id
+    assert plan[1]["text"] == "ছবিটার ক্যাপশন"
+    # the single-message columns stay empty so nothing is sent twice
+    assert not campaign["text"] and not campaign["file_ids"]
+
+
+def test_multi_message_mode_refuses_an_empty_draft(client):
+    _store()
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    response = client.post("/admin/broadcast/new",
+                           data={"audience": "all", "mode": "multi", "action": "draft",
+                                 "text": "", "file_id": 0},
+                           headers=_auth(), follow_redirects=False)
+    assert response.status_code == 303 and "warn=" in response.headers["location"]
+    assert db.campaigns(limit=1) == []
+
+
+def test_the_campaign_page_keeps_the_public_draft_link(client):
+    """The link is created once — it must stay visible instead of only in a flash."""
+    _store()
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    client.post("/admin/broadcast/new",
+                data={"audience": "all", "text": "খসড়া", "action": "draft"},
+                headers=_auth(), follow_redirects=False)
+    campaign_id = db.campaigns(limit=1)[0]["id"]
+    shared = client.post(f"/admin/broadcast/{campaign_id}/share", headers=_auth(),
+                         follow_redirects=False)
+    assert shared.status_code == 303
+    page = client.get(f"/admin/broadcast/{campaign_id}", headers=_auth()).text
+    assert "খসড়ার পাবলিক লিংক" in page
+    token = db.campaign_links(campaign_id, kind="draft")[0]["token"]
+    assert token in page
+
+
+def test_the_public_draft_page_is_read_only_and_hides_the_panel(client):
+    _store()
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    client.post("/admin/broadcast/new",
+                data={"audience": "all", "text": "পাবলিক খসড়া", "action": "draft"},
+                headers=_auth(), follow_redirects=False)
+    campaign_id = db.campaigns(limit=1)[0]["id"]
+    client.post(f"/admin/broadcast/{campaign_id}/share", headers=_auth(),
+                follow_redirects=False)
+    token = db.campaign_links(campaign_id, kind="draft")[0]["token"]
+
+    page = client.get(f"/draft/{token}")
+    assert page.status_code == 200 and "পাবলিক খসড়া" in page.text
+    for leak in ("/admin/settings", "control room", "ইউজার", "পাসওয়ার্ড"):
+        assert leak not in page.text
+    assert db.campaign_links(campaign_id, kind="draft")[0]["clicks"] >= 1
+    assert client.get("/draft/does-not-exist").status_code == 200   # friendly, not a crash
+
+
+def test_campaign_actions_leave_an_audit_trail(client):
+    """Every panel button that touches a campaign is answered on /admin/audit."""
+    from app.services import audit
+    _store()
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    client.post("/admin/broadcast/new",
+                data={"audience": "all", "text": "ট্রেইল", "action": "draft"},
+                headers=_auth(), follow_redirects=False)
+    campaign_id = db.campaigns(limit=1)[0]["id"]
+    client.post(f"/admin/broadcast/{campaign_id}/share", headers=_auth(),
+                follow_redirects=False)
+    client.post(f"/admin/broadcast/{campaign_id}/retry", headers=_auth(),
+                follow_redirects=False)
+    client.post(f"/admin/broadcast/{campaign_id}/delete", headers=_auth(),
+                follow_redirects=False)
+
+    names = [row["name"] for row in audit.recent(limit=100)]
+    assert "draft_shared" in names
+    assert "broadcast_retry" in names and "broadcast_deleted" in names
+    # and the page shows them with a human label, not the raw event name
+    page = client.get("/admin/audit", headers=_auth()).text
+    assert "খসড়ার পাবলিক লিংক" in page and "ক্যাম্পেইন মুছে ফেলা" in page
+    assert "draft_shared" not in page
