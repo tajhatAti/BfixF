@@ -1210,3 +1210,117 @@ def test_the_digest_page_is_a_page_not_an_action(client):
     campaigns = db.campaigns(limit=5)
     assert campaigns and campaigns[0]["title"].startswith("সাপ্তাহিক ডাইজেস্ট")
     assert campaigns[0]["status"] == "draft"              # nothing was delivered
+
+
+# ------------------------------------------------------- backup / move to a host
+def test_the_backup_page_explains_and_offers_the_download(client):
+    _store("Backup store")
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    page = client.get("/admin/backup", headers=_auth())
+    assert page.status_code == 200
+    assert 'class="page-heading"' in page.text and 'class="crumbs"' in page.text
+    assert "backup/download" in page.text                      # ⬇ নামান
+    assert "backup/restore" in page.text and "backup/save" in page.text
+    assert "BFIXF1:" in page.text                              # paste box
+    assert "নতুন হোস্টে নেওয়ার ধাপ" in page.text
+
+    data = client.get("/admin/backup/download", headers=_auth())
+    assert data.status_code == 200
+    assert data.content[:2] == b"\x1f\x8b"                     # a real gzip backup
+    from app.services import portable
+    info = portable.describe(data.content)
+    assert info["ok"] and info["counts"]["users"] >= 1
+
+
+def test_a_restore_from_the_panel_brings_the_data_back(client):
+    store = _store("Before")
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    from app.services import portable
+    backup = portable.export_bytes()
+
+    db.create_store(ADMIN_ID, "Made after the backup")
+    assert len(db.all_stores()) == 2
+
+    response = client.post("/admin/backup/restore",
+                           files={"file": ("move.bfixf.gz", backup, "application/gzip")},
+                           data={"confirm": "yes"}, headers=_auth(),
+                           follow_redirects=False)
+    assert response.status_code == 303
+    assert "flash=" in response.headers["location"]
+    names = [row["name"] for row in db.all_stores()]
+    assert names == ["Before"]                                  # back to the snapshot
+    page = client.get("/admin/backup", headers=_auth()).text
+    assert "ইনস্টল ফিরিয়ে আনা হয়েছে" in page                     # the report stays on screen
+    assert "সেফটি" in page                                      # safety copy is listed
+
+
+def test_a_restore_needs_the_confirmation_box(client):
+    _store("Guarded")
+    from app.services import portable
+    backup = portable.export_bytes()
+    response = client.post("/admin/backup/restore",
+                           files={"file": ("x.bfixf.gz", backup, "application/gzip")},
+                           headers=_auth(), follow_redirects=False)
+    assert response.status_code == 303 and "warn=" in response.headers["location"]
+    assert len(db.all_stores()) == 1                            # nothing happened
+
+
+def test_a_broken_backup_is_refused_and_changes_nothing(client):
+    _store("Safe")
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    response = client.post("/admin/backup/restore",
+                           files={"file": ("broken.bfixf.gz", b"definitely not a backup",
+                                           "application/gzip")},
+                           data={"confirm": "yes"}, headers=_auth(),
+                           follow_redirects=False)
+    assert response.status_code == 303 and "warn=" in response.headers["location"]
+    assert len(db.all_stores()) == 1 and db.stats()["users"] >= 1
+
+
+def test_the_backup_code_can_be_pasted_in_the_panel(client):
+    _store("Pasted")
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    from app.services import portable
+    codes = portable.text_codes(chunk=600)
+    assert len(codes) > 1
+    db.create_store(ADMIN_ID, "Temp")
+    response = client.post("/admin/backup/restore",
+                           data={"confirm": "yes", "code": "\n".join(reversed(codes))},
+                           headers=_auth(), follow_redirects=False)
+    assert response.status_code == 303 and "flash=" in response.headers["location"]
+    assert [row["name"] for row in db.all_stores()] == ["Pasted"]
+
+
+def test_a_new_host_can_restore_from_the_setup_screen(tmp_path, monkeypatch):
+    """The real move: fresh server, nothing configured → restore before /setup."""
+    monkeypatch.setattr(cfg, "BACKUP_DIR", str(tmp_path / "backups"))
+    db.bind(str(tmp_path / "origin.sqlite3"))
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    db.set_user_peer(USER_ID, 4242, "Buyer")
+    store = db.create_store(ADMIN_ID, "Origin store")
+    db.add_file(store["id"], "Vid", "Video", -100, 5, size=1000)
+    from app.services import portable
+    backup = portable.export_bytes()
+
+    # new host: empty database, bot not configured yet → the panel is not reachable
+    monkeypatch.setattr(cfg, "BOT_TOKEN", "")
+    monkeypatch.setattr(cfg, "API_ID", 0)
+    monkeypatch.setattr(cfg, "API_HASH", "")
+    db.bind(str(tmp_path / "newhost.sqlite3"))
+    import web.dashboard as dashboard
+    from fastapi.testclient import TestClient
+    fresh = TestClient(dashboard.app)
+    assert fresh.get("/admin", follow_redirects=False).status_code == 303   # → /setup
+    # the owner signs in with the panel password, then lands on the setup screen
+    login = fresh.post("/admin/login", data={"password": dashboard.ADMIN_LOGIN_PASSWORD},
+                       follow_redirects=False)
+    assert login.status_code in (200, 303)
+    setup = fresh.get("/setup")
+    assert "ফিরিয়ে আনুন" in setup.text                          # the restore card is there
+
+    response = fresh.post("/setup/restore",
+                          files={"file": ("move.bfixf.gz", backup, "application/gzip")},
+                          data={"confirm": "yes"}, follow_redirects=False)
+    assert response.status_code == 303
+    assert db.stats()["users"] >= 1 and db.all_stores()[0]["name"] == "Origin store"
+    assert db.user_peer(USER_ID)["access_hash"] == 4242         # broadcasts still work

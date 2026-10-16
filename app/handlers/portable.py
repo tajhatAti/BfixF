@@ -49,8 +49,8 @@ def _is_admin_private(event) -> bool:
 
 
 def _confirm_buttons(admin_id: int) -> list[list[Button]]:
-    return [[Button.inline("✅ ফিরিয়ে আনুন", "rst:go"),
-             Button.inline("✖️ বাতিল", "rst:no")]]
+    return [[Button.inline("✅ ফিরিয়ে আনুন", "bk:go"),
+             Button.inline("✖️ বাতিল", "bk:no")]]
 
 
 def _summary(data: bytes) -> tuple[bool, str]:
@@ -192,7 +192,7 @@ async def restore_text(event) -> None:
     raise events.StopPropagation
 
 
-@route("rst:")
+@route("bk:")
 async def restore_confirm(event, rest: str) -> None:
     """The ✅ / ✖️ buttons under the backup preview."""
     admin_id = event.sender_id
