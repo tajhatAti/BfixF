@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 
 from app.runtime import bot
-from app.services import settings
+from app.services import media_cache, settings
 from app.storage import db
 
 CHUNK = 512 * 1024                    # Telegram download request size (multiple of 4096)
@@ -135,6 +135,50 @@ def demo_path(item: dict, suffix: str = ".mp4") -> Path | None:
     return demo_dir() / f"{int(item['msg_id'])}{suffix}"
 
 
+def cached_size(item: dict) -> int:
+    """Bytes of this clip already on disk (`media_cache`) — 0 when there are none.
+
+    A clip whose bytes are here plays instantly: no Telegram, no mirror, no wait.
+    """
+    if not item or is_demo(item):
+        return 0
+    try:
+        return media_cache.local_size(item)
+    except Exception:
+        return 0
+
+
+def cached_thumb(item: dict) -> bytes | None:
+    try:
+        return media_cache.local_thumb(item)
+    except Exception:
+        return None
+
+
+def iter_cached(item: dict, start: int, end: int):
+    """Range-stream a cached clip — the site works even with Telegram unreachable."""
+    return media_cache.iter_bytes(item, start, end)
+
+
+async def prepare(item: dict, store: dict | None = None) -> int:
+    """Fetch this clip from Telegram *now* and cache it. Returns the size or 0.
+
+    The website calls this when a visitor presses “চালান” on something the cache
+    does not have yet, so a play button never ends in “লোড হলো না”.
+    """
+    if not item:
+        return 0
+    size = cached_size(item)
+    if size:
+        return size
+    payload = await media_cache.fetch_now(item, store)
+    return len(payload or b"")
+
+
+def _cached_locally(item: dict) -> bool:
+    return cached_size(item) > 0
+
+
 def _decorate(item: dict, bots: str = "", index: int = 0) -> dict:
     """Add the fields the templates and the JSON API need."""
     row = dict(item)
@@ -218,6 +262,8 @@ def playable_rank(item: dict) -> int:
     if is_demo(item):
         path = demo_path(item)
         return 0 if path and path.is_file() else 1
+    if _cached_locally(item):
+        return 0                                   # bytes are here — instant play
     return 0 if item.get("mirror_msg") else 1
 
 

@@ -74,6 +74,17 @@ REGISTRY: list[Group] = [
             _s("MIRROR_MAX_MB", "ক্যাশ করার সর্বোচ্চ ফাইল সাইজ (MB)", "content",
                kind="int", default=1900,
                hint="এর চেয়ে বড় ফাইল বট সরাসরি পাঠাবে না (সেশন লাগবে)"),
+            _s("MEDIA_CACHE_MAX_MB", "ওয়েবসাইট প্লেয়ারের জন্য সর্বোচ্চ ফাইল (MB)", "content",
+               kind="int", default=64,
+               hint="এই সাইজ পর্যন্ত ফাইল সাইটে ক্যাশ হয়ে সাথে সাথে চলে (বড় ফাইল সরাসরি "
+                    "টেলিগ্রাম থেকে স্ট্রিম হয়)"),
+            _s("MEDIA_CACHE_TOTAL_MB", "ওয়েবে ক্যাশ রাখার মোট সীমা (MB)", "content",
+               kind="int", default=1024,
+               hint="সীমা ছাড়ালে সবচেয়ে পুরোনো ক্যাশ নিজে থেকেই মুছে যায়"),
+            _s("VISITOR_KEEP_DAYS", "ভিজিটর হিসাব কত দিন রাখবেন", "content",
+               kind="int", default=90,
+               hint="এর পুরোনো ভিজিট/ক্লিকের রেকর্ড নিজে থেকেই মুছে যায় "
+                    "(/admin/visitors পেজেও বদলানো যায়)"),
             _s("MAINTENANCE_MODE", "মেইনটেন্যান্স মোড (ইউজারদের জন্য বট বন্ধ)", "emergency",
                kind="bool", default=False,
                hint="চালু থাকলে শুধু admin বট ব্যবহার করতে পারবে। বটে: /maint on | /maint off"),

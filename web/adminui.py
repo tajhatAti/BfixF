@@ -338,6 +338,13 @@ pre { margin:12px 0; padding:12px 14px; background:var(--surface-3);
     background:var(--ink); border-radius:50%; }
 .timeline li:last-child { padding-bottom:0; }
 .timeline .t-when { color:var(--muted); font-size:11.5px; }
+/* a plain bar chart for the visitors page — height = visitors, no colour games */
+.visitors-chart { display:flex; align-items:flex-end; gap:4px; height:130px; margin:12px 0 6px; }
+.visitors-chart .bar { flex:1 1 0; display:flex; flex-direction:column; justify-content:flex-end;
+    align-items:center; gap:4px; height:100%; }
+.visitors-chart .bar i { display:block; width:100%; background:var(--ink); border-radius:3px 3px 0 0;
+    min-height:3px; }
+.visitors-chart .bar span { font-size:9.5px; color:var(--muted); }
 
 /* ---------------------------------------------------------------- mobile */
 @media (max-width:900px) {

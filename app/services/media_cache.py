@@ -601,6 +601,13 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool)
         if not await _download(client, source, tmp.name, size or None):
             _note(file_row["id"], "ভিডিও ডাউনলোড করা যায়নি (নেটওয়ার্ক/ফাইল সমস্যা)")
             return file_row
+        # Keep the bytes we just downloaded: the website player can then serve this
+        # file instantly (and even while Telegram is unreachable) — see store_bytes.
+        try:
+            with open(tmp.name, "rb") as handle:
+                store_bytes(file_row, handle.read())
+        except OSError as exc:
+            log.debug("caching the downloaded mirror failed: %s", exc)
         sent = await safe_call(
             client.send_file, peer, tmp.name,
             caption=clean_text(file_row.get("name") or "")[:200],
@@ -702,6 +709,246 @@ async def copy_between_chats(source_chat: int, msg_id: int, target_chat: int,
     except Exception as exc:
         log.debug("copy_between_chats failed: %s", exc)
         return None
+
+
+# ---------------------------------------------------------------- web byte cache
+# Why this exists
+#   The public site plays media straight from Telegram. When the mirror is not
+#   ready yet — or the owner's userbot session is offline — the browser gets a
+#   404, the player shows “চালানো যাচ্ছে না” and jumps to the next slide. That is
+#   exactly the “মিডিয়া চলতেছে না” the owner reported.
+#
+#   The fix: any file the bot *has* downloaded for a store click (the mirror
+#   re-upload path) is also kept on disk, small and ready. The website then
+#   serves it instantly, with Range support, even with Telegram unreachable —
+#   and the first visitor never waits for a mirror that is still being built.
+#
+#   Only `MEDIA_CACHE_MAX_MB` (default 64 MB) per file is kept; bigger videos are
+#   streamed from Telegram as before, and a full cache is pruned oldest-first.
+def bytes_dir() -> "Path":
+    from pathlib import Path
+    return Path(os.getenv("MEDIA_CACHE_DIR", "media_cache"))
+
+
+def _max_cache_bytes() -> int:
+    mb = settings.get_int("MEDIA_CACHE_MAX_MB", 64) or 64
+    return max(1, mb) * 1024 * 1024
+
+
+def _total_cache_bytes() -> int:
+    budget = (settings.get_int("MEDIA_CACHE_TOTAL_MB", 1024) or 1024) * 1024 * 1024
+    return max(64 * 1024 * 1024, budget)
+
+
+def cache_key(file_row: dict) -> str:
+    """A stable name for one media item — a store file *or* a hand-picked pin."""
+    if not file_row:
+        return ""
+    file_id = int(file_row.get("id") or 0)
+    if file_id:
+        return f"f{file_id}"
+    pin_id = int(file_row.get("pin_id") or 0)
+    if pin_id:
+        return f"p{pin_id}"
+    chat = int(file_row.get("chat_id") or 0)
+    msg = int(file_row.get("msg_id") or 0)
+    return f"c{chat}_{msg}" if chat and msg else ""
+
+
+def _bytes_path(file_row, suffix: str = ".bin"):
+    key = file_row if isinstance(file_row, str) else cache_key(file_row)
+    if not key:
+        raise ValueError("no cache key")
+    return bytes_dir() / f"{key}{suffix}"
+
+
+def store_bytes(file_row: dict, payload: bytes, thumb: bytes = b"") -> bool:
+    """Remember what we already downloaded, so the website can play it at once."""
+    try:
+        key = cache_key(file_row)
+        if not key or not payload:
+            return False
+        if len(payload) > _max_cache_bytes():
+            return False
+        directory = bytes_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        _bytes_path(key).write_bytes(payload)
+        if thumb:
+            _bytes_path(key, ".jpg").write_bytes(thumb[:1024 * 512])
+        db.set_meta(f"webcache:{key}", str(len(payload)))
+        _prune_cache()
+        _cache_problems.pop(key, None)
+        log.info("cached %s (%.2f MB) for the website player", key,
+                 len(payload) / 1048576)
+        return True
+    except OSError as exc:
+        log.debug("byte cache write failed: %s", exc)
+        return False
+
+
+def _prune_cache() -> int:
+    """Keep the folder under the budget — oldest first, never a file in use."""
+    budget = _total_cache_bytes()
+    entries = []
+    total = 0
+    try:
+        for path in bytes_dir().glob("*.bin"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            entries.append((stat.st_mtime, stat.st_size, path))
+            total += stat.st_size
+    except OSError:
+        return 0
+    if total <= budget:
+        return 0
+    removed = 0
+    for _mtime, size, path in sorted(entries):        # oldest first
+        if total <= budget:
+            break
+        try:
+            path.unlink()
+            _bytes_path(path.stem, ".jpg").unlink(missing_ok=True)
+            db.set_meta(f"webcache:{path.stem}", "")
+            total -= size
+            removed += 1
+        except (OSError, ValueError):
+            continue
+    if removed:
+        log.info("pruned %s cached clip(s) to stay inside the cache budget", removed)
+    return removed
+
+
+def local_bytes(file_row: dict) -> bytes | None:
+    """The whole cached file, or None when it is not cached (yet)."""
+    try:
+        path = _bytes_path(file_row)
+        if path.is_file():
+            return path.read_bytes()
+    except (OSError, TypeError, ValueError):
+        return None
+    return None
+
+
+def local_size(file_row: dict) -> int:
+    try:
+        path = _bytes_path(file_row)
+        return path.stat().st_size if path.is_file() else 0
+    except (OSError, TypeError, ValueError):
+        return 0
+
+
+def local_thumb(file_row: dict) -> bytes | None:
+    try:
+        path = _bytes_path(file_row, ".jpg")
+        return path.read_bytes() if path.is_file() else None
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+async def iter_bytes(file_row: dict, start: int, end: int):
+    """Stream a byte range of a cached clip (max 1 MB per read)."""
+    path = _bytes_path(file_row)
+    step = 1024 * 1024
+    with open(path, "rb") as handle:
+        handle.seek(int(start))
+        remaining = max(0, int(end) - int(start) + 1)
+        while remaining > 0:
+            chunk = handle.read(min(step, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+def forget_bytes(file_row) -> bool:
+    """Drop one cached clip (the panel's 🗑 button)."""
+    removed = False
+    try:
+        key = cache_key(file_row) if isinstance(file_row, dict) else str(file_row)
+    except Exception:
+        return False
+    for suffix in (".bin", ".jpg"):
+        try:
+            _bytes_path(key, suffix).unlink()
+            removed = True
+        except OSError:
+            continue
+    db.set_meta(f"webcache:{key}", "")
+    return removed
+
+
+def cached_count() -> int:
+    try:
+        return sum(1 for _ in bytes_dir().glob("*.bin"))
+    except OSError:
+        return 0
+
+
+_cache_problems: dict[str, str] = {}
+
+
+def cache_problem(file_row) -> str:
+    """Why the last on-demand fetch for this item failed ('' = none)."""
+    try:
+        key = cache_key(file_row) if isinstance(file_row, dict) else str(file_row)
+    except Exception:
+        return ""
+    return _cache_problems.get(key, "")
+
+
+async def fetch_now(file_row: dict, store: dict | None = None,
+                    timeout: float = 12.0) -> bytes | None:
+    """Download a file the bot can read and cache it — right now, on demand.
+
+    Called by the website when a visitor presses “চালান” on a clip that has no
+    cache yet: the player waits for real bytes instead of showing “লোড হলো না”.
+    """
+    if not file_row:
+        return None
+    from app.runtime import bot
+    cached = local_bytes(file_row)
+    if cached:
+        return cached
+    try:
+        message = await _media_from(bot, int(file_row["chat_id"]), int(file_row["msg_id"]))
+    except Exception as exc:
+        message = None
+        log.debug("on-demand fetch: %s", exc)
+    if message is None:
+        try:
+            client = await live_session(file_row, store)
+            if client is not None:
+                message = await _media_from(client, int(file_row["chat_id"]),
+                                            int(file_row["msg_id"]))
+        except Exception as exc:
+            log.debug("on-demand fetch via the session: %s", exc)
+    if message is None:
+        _cache_problems[cache_key(file_row)] = "মিডিয়া এখন পড়া যাচ্ছে না"
+        return None
+    size = int(getattr(getattr(message, "file", None), "size", 0) or 0)
+    if size and size > _max_cache_bytes():
+        _cache_problems[cache_key(file_row)] = (
+            f"ফাইলটা {size // (1024 * 1024)} MB — স্বয়ংক্রিয় ক্যাশের সীমার চেয়ে বড়")
+        return None
+    try:
+        payload = await asyncio.wait_for(
+            bot.download_media(message, file=bytes), timeout=timeout)
+    except Exception as exc:
+        _cache_problems[cache_key(file_row)] = f"ডাউনলোড ব্যর্থ ({str(exc)[:60]})"
+        return None
+    if not payload:
+        _cache_problems[cache_key(file_row)] = "খালি ফাইল এসেছে"
+        return None
+    payload = bytes(payload)
+    thumb = b""
+    try:
+        thumb = await bot.download_media(message, file=bytes, thumb=-1) or b""
+    except Exception:
+        thumb = b""
+    store_bytes(file_row, payload, bytes(thumb) if thumb else b"")
+    return payload
 
 
 def stats() -> dict:

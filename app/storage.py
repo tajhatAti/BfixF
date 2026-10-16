@@ -404,6 +404,57 @@ CREATE TABLE IF NOT EXISTS bc_media (
     used     INTEGER DEFAULT 0
 );
 
+-- ==================== visitor analytics (who is on the site right now) ========
+-- One row per *visit* (a person + a session, closed after 30 quiet minutes), so
+-- “কতজন এখন অনলাইনে / কোথা থেকে এসেছে” needs no external service at all.
+CREATE TABLE IF NOT EXISTS visits (
+    vid         TEXT PRIMARY KEY,      -- random id kept in the visitor's cookie
+    user_id     INTEGER DEFAULT 0,     -- the Telegram id once we know it
+    is_admin    INTEGER DEFAULT 0,     -- the owner's own visits are counted separately
+    started_at  REAL,
+    last_seen   REAL,
+    ended_at    REAL DEFAULT 0,
+    pageviews   INTEGER DEFAULT 0,
+    ip          TEXT DEFAULT '',
+    country     TEXT DEFAULT '',
+    device      TEXT DEFAULT '',
+    device_kind TEXT DEFAULT '',
+    os          TEXT DEFAULT '',
+    browser     TEXT DEFAULT '',
+    referrer    TEXT DEFAULT '',
+    source      TEXT DEFAULT '',
+    landing     TEXT DEFAULT '',
+    user_agent  TEXT DEFAULT '',
+    bot         INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS page_views (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    vid      TEXT,
+    user_id  INTEGER DEFAULT 0,
+    path     TEXT DEFAULT '',
+    title    TEXT DEFAULT '',
+    status   INTEGER DEFAULT 200,
+    ms       INTEGER DEFAULT 0,
+    is_admin INTEGER DEFAULT 0,
+    ts       REAL
+);
+CREATE TABLE IF NOT EXISTS visit_events (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    vid      TEXT DEFAULT '',
+    user_id  INTEGER DEFAULT 0,
+    name     TEXT DEFAULT '',          -- media_play, store_open, link_open, login…
+    detail   TEXT DEFAULT '',
+    path     TEXT DEFAULT '',
+    store_id INTEGER DEFAULT 0,
+    file_id  INTEGER DEFAULT 0,
+    ts       REAL
+);
+CREATE INDEX IF NOT EXISTS idx_visits_seen   ON visits(last_seen);
+CREATE INDEX IF NOT EXISTS idx_views_ts      ON page_views(ts);
+CREATE INDEX IF NOT EXISTS idx_views_vid     ON page_views(vid);
+CREATE INDEX IF NOT EXISTS idx_events_ts     ON visit_events(ts);
+CREATE INDEX IF NOT EXISTS idx_events_name   ON visit_events(name);
+
 -- Hand-picked media for the public auto-playing reel (home page). Pinned items
 -- come first, then the newest free videos.
 CREATE TABLE IF NOT EXISTS feed_pins (
@@ -2596,3 +2647,224 @@ class _LazyDB:
 
 
 db = _LazyDB()
+
+
+# ============================================================================
+# Visitor analytics — who is on the website now, and what they are doing.
+# The tables live in SCHEMA (see `visits`, `page_views`, `visit_events`); this
+# helper keeps every query in one place so the panel stays readable.
+# ============================================================================
+class _VisitorStore:
+    """Thin query layer over the three analytics tables."""
+
+    def __init__(self, database: "Database") -> None:
+        self._db = database
+
+    # ---------------------------------------------------------------- writes
+    def visit(self, vid: str) -> dict | None:
+        return self._db._dict(self._db._one("SELECT * FROM visits WHERE vid = ?",
+                                            (str(vid),)))
+
+    def open_visit(self, vid: str, *, user_id: int = 0, is_admin: int = 0, ip: str = "",
+                   country: str = "", device: str = "", device_kind: str = "",
+                   os: str = "", browser: str = "", referrer: str = "", source: str = "",
+                   landing: str = "", user_agent: str = "", bot: int = 0,
+                   offline: bool = False) -> None:
+        now = time.time()
+        self._db._run(
+            "INSERT INTO visits(vid, user_id, is_admin, started_at, last_seen, ended_at,"
+            " pageviews, ip, country, device, device_kind, os, browser, referrer, source,"
+            " landing, user_agent, bot) VALUES(?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(vid) DO UPDATE SET user_id = excluded.user_id,"
+            " last_seen = excluded.last_seen, ended_at = 0, ip = excluded.ip,"
+            " country = excluded.country, device = excluded.device,"
+            " device_kind = excluded.device_kind, os = excluded.os, browser = excluded.browser,"
+            " referrer = excluded.referrer, source = excluded.source,"
+            " landing = excluded.landing, user_agent = excluded.user_agent",
+            (str(vid), int(user_id or 0), int(is_admin or 0), now, now, str(ip or ""),
+             str(country or ""), str(device or ""), str(device_kind or ""), str(os or ""),
+             str(browser or ""), str(referrer or ""), str(source or ""), str(landing or ""),
+             str(user_agent or ""), int(bot or 0)))
+
+    def touch_visit(self, vid: str, path: str = "", user_id: int = 0) -> None:
+        if user_id:
+            self._db._run("UPDATE visits SET last_seen = ?, user_id = ? WHERE vid = ?",
+                          (time.time(), int(user_id), str(vid)))
+            return
+        self._db._run("UPDATE visits SET last_seen = ? WHERE vid = ?", (time.time(), str(vid)))
+
+    def close_visit(self, vid: str) -> None:
+        self._db._run("UPDATE visits SET ended_at = ? WHERE vid = ?", (time.time(), str(vid)))
+
+    def add_page_view(self, vid: str, *, path: str = "", title: str = "", status: int = 200,
+                      ms: int = 0, is_admin: int = 0, user_id: int = 0) -> None:
+        self._db._run(
+            "INSERT INTO page_views(vid, user_id, path, title, status, ms, is_admin, ts)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (str(vid), int(user_id or 0), str(path or "")[:160], str(title or "")[:120],
+             int(status or 200), int(ms or 0), int(is_admin or 0), time.time()))
+        self._db._run("UPDATE visits SET pageviews = pageviews + 1 WHERE vid = ?", (str(vid),))
+
+    def add_event(self, vid: str, name: str, *, detail: str = "", path: str = "",
+                  store_id: int = 0, file_id: int = 0, user_id: int = 0) -> None:
+        self._db._run(
+            "INSERT INTO visit_events(vid, user_id, name, detail, path, store_id, file_id, ts)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (str(vid or ""), int(user_id or 0), str(name or "")[:40], str(detail or "")[:200],
+             str(path or "")[:160], int(store_id or 0), int(file_id or 0), time.time()))
+
+    # ----------------------------------------------------------------- reads
+    def live_visits(self, seconds: int = 300) -> list[dict]:
+        since = time.time() - max(30, int(seconds))
+        return [dict(row) for row in self._db._q(
+            "SELECT * FROM visits WHERE last_seen >= ? ORDER BY last_seen DESC LIMIT 300",
+            (since,))]
+
+    def recent_visits(self, seconds: int = 86400, limit: int = 50) -> list[dict]:
+        since = time.time() - max(60, int(seconds))
+        return [dict(row) for row in self._db._q(
+            "SELECT v.*, u.name AS user_name, u.username AS user_username FROM visits v"
+            " LEFT JOIN users u ON u.user_id = v.user_id"
+            " WHERE v.last_seen >= ? ORDER BY v.last_seen DESC LIMIT ?",
+            (since, int(limit)))]
+
+    def media_watchers(self, file_id: int, limit: int = 200) -> list[dict]:
+        """Who opened/played one particular file (the “কারা দেখল” view)."""
+        return [dict(row) for row in self._db._q(
+            "SELECT e.*, u.name AS user_name, u.username AS user_username FROM visit_events e"
+            " LEFT JOIN users u ON u.user_id = e.user_id WHERE e.file_id = ?"
+            " ORDER BY e.id DESC LIMIT ?", (int(file_id), int(limit)))]
+
+    def top_paths(self, seconds: int = 0, limit: int = 10) -> list[dict]:
+        sql = ("SELECT path, COUNT(*) AS hits, COUNT(DISTINCT vid) AS people FROM page_views"
+               " WHERE is_admin = 0 AND path NOT LIKE '/admin%'")
+        params: list = []
+        if seconds:
+            sql += " AND ts >= ?"
+            params.append(time.time() - int(seconds))
+        sql += " GROUP BY path ORDER BY hits DESC LIMIT ?"
+        params.append(int(limit))
+        return [dict(row) for row in self._db._q(sql, tuple(params))]
+
+    def top_media(self, limit: int = 10) -> list[dict]:
+        rows = self._db._q(
+            "SELECT e.file_id, COUNT(*) AS plays, COUNT(DISTINCT e.vid) AS people"
+            " FROM visit_events e WHERE e.name IN ('media_play', 'media_open', 'prepare')"
+            " AND e.file_id > 0 GROUP BY e.file_id ORDER BY plays DESC LIMIT ?",
+            (int(limit),))
+        out = []
+        for row in rows:
+            item = dict(row)
+            file_row = self._db.file(item["file_id"]) if item.get("file_id") else None
+            item["name"] = (file_row or {}).get("name") or f"ফাইল #{item['file_id']}"
+            item["kind"] = (file_row or {}).get("kind") or ""
+            out.append(item)
+        return out
+
+    def top_sources(self, limit: int = 8) -> list[dict]:
+        return [dict(row) for row in self._db._q(
+            "SELECT source, COUNT(*) AS people FROM visits WHERE is_admin = 0"
+            " GROUP BY source ORDER BY people DESC LIMIT ?", (int(limit),))]
+
+    def top_countries(self, limit: int = 8) -> list[dict]:
+        return [dict(row) for row in self._db._q(
+            "SELECT country, COUNT(*) AS people FROM visits WHERE is_admin = 0"
+            " AND country <> '' GROUP BY country ORDER BY people DESC LIMIT ?", (int(limit),))]
+
+    def devices(self, limit: int = 8) -> list[dict]:
+        return [dict(row) for row in self._db._q(
+            "SELECT device, COUNT(*) AS people FROM visits WHERE is_admin = 0"
+            " GROUP BY device ORDER BY people DESC LIMIT ?", (int(limit),))]
+
+    def recent_events(self, limit: int = 40) -> list[dict]:
+        return [dict(row) for row in self._db._q(
+            "SELECT e.*, u.name AS user_name, u.username AS user_username FROM visit_events e"
+            " LEFT JOIN users u ON u.user_id = e.user_id"
+            " ORDER BY e.id DESC LIMIT ?", (int(limit),))]
+
+    def events_of(self, vid: str, limit: int = 200) -> list[dict]:
+        return [dict(row) for row in self._db._q(
+            "SELECT * FROM visit_events WHERE vid = ? ORDER BY id DESC LIMIT ?",
+            (str(vid), int(limit)))]
+
+    def pages_of(self, vid: str, limit: int = 200) -> list[dict]:
+        return [dict(row) for row in self._db._q(
+            "SELECT * FROM page_views WHERE vid = ? ORDER BY id DESC LIMIT ?",
+            (str(vid), int(limit)))]
+
+    def per_day(self, days: int = 14) -> list[dict]:
+        since = time.time() - int(days) * 86400
+        by_day: dict[str, dict] = {}
+        for row in self._db._q(
+                "SELECT started_at, is_admin, pageviews FROM visits WHERE started_at >= ?",
+                (since,)):
+            key = time.strftime("%Y-%m-%d", time.localtime(float(row["started_at"] or 0)))
+            bucket = by_day.setdefault(key, {"day": key, "visitors": 0, "views": 0, "events": 0})
+            if not int(row["is_admin"] or 0):
+                bucket["visitors"] += 1
+            bucket["views"] += int(row["pageviews"] or 0)
+        for row in self._db._q(
+                "SELECT ts FROM visit_events WHERE ts >= ?", (since,)):
+            key = time.strftime("%Y-%m-%d", time.localtime(float(row["ts"])))
+            bucket = by_day.setdefault(key, {"day": key, "visitors": 0, "views": 0, "events": 0})
+            bucket["events"] += 1
+        return list(by_day.values())
+
+    def summary(self, day: str) -> dict:
+        start = time.mktime(time.strptime(day, "%Y-%m-%d"))
+        end = start + 86400
+        visitors = self._db._one(
+            "SELECT COUNT(DISTINCT vid) AS people, COUNT(*) AS visits, SUM(pageviews) AS views"
+            " FROM visits WHERE started_at >= ? AND started_at < ? AND is_admin = 0",
+            (start, end))
+        events = self._db._one("SELECT COUNT(*) AS n FROM visit_events WHERE ts >= ? AND ts < ?",
+                               (start, end))
+        new_people = self._db._one(
+            "SELECT COUNT(*) AS n FROM visits WHERE started_at >= ? AND started_at < ?"
+            " AND is_admin = 0 AND vid NOT IN (SELECT vid FROM visits WHERE started_at < ?)",
+            (start, end, start))
+        return {"day": day, "people": int((visitors or {})["people"] or 0) if visitors else 0,
+                "visits": int((visitors or {})["visits"] or 0) if visitors else 0,
+                "views": int((visitors or {})["views"] or 0) if visitors else 0,
+                "events": int((events or {})["n"] or 0) if events else 0,
+                "new_people": int((new_people or {})["n"] or 0) if new_people else 0}
+
+    def totals(self) -> dict:
+        row = self._db._one(
+            "SELECT COUNT(*) AS visits, COUNT(DISTINCT vid) AS people, SUM(pageviews) AS views,"
+            " MIN(started_at) AS first_at, MAX(last_seen) AS last_at FROM visits WHERE is_admin = 0")
+        events = self._db._one("SELECT COUNT(*) AS n FROM visit_events")
+        return {"visits": int((row or {})["visits"] or 0) if row else 0,
+                "people": int((row or {})["people"] or 0) if row else 0,
+                "views": int((row or {})["views"] or 0) if row else 0,
+                "events": int((events or {})["n"] or 0) if events else 0,
+                "first_at": float((row or {})["first_at"] or 0) if row else 0.0,
+                "last_at": float((row or {})["last_at"] or 0) if row else 0.0}
+
+    def linked_users(self, limit: int = 30) -> list[dict]:
+        return [dict(row) for row in self._db._q(
+            "SELECT v.vid, v.user_id, v.last_seen, v.device, v.source, v.landing,"
+            " u.name AS user_name, u.username AS user_username FROM visits v"
+            " JOIN users u ON u.user_id = v.user_id WHERE v.user_id > 0 AND v.is_admin = 0"
+            " ORDER BY v.last_seen DESC LIMIT ?", (int(limit),))]
+
+    # ------------------------------------------------------------- retention
+    def prune(self, days: int = 90) -> dict:
+        edge = time.time() - max(1, int(days)) * 86400
+        removed = 0
+        for table, column in (("page_views", "ts"), ("visit_events", "ts"),
+                              ("visits", "last_seen")):
+            cursor = self._db._run(f"DELETE FROM {table} WHERE {column} < ?", (edge,))
+            removed += cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        return {"days": int(days), "removed": removed, "before": edge}
+
+    def forget(self, vid: str) -> int:
+        removed = 0
+        for sql in ("DELETE FROM page_views WHERE vid = ?", "DELETE FROM visit_events WHERE vid = ?",
+                    "DELETE FROM visits WHERE vid = ?"):
+            cursor = self._db._run(sql, (str(vid),))
+            removed += cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        return removed
+
+
+Database.visitors = property(lambda self: _VisitorStore(self))          # type: ignore[attr-defined]

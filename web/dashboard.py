@@ -28,6 +28,7 @@ campaign waits and starts by itself the moment the bot is online again.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import html
@@ -55,7 +56,7 @@ from web import adminui as ui                                                   
 from app.services import portable as portable_service                          # noqa: E402
 from app.services import (access, basepath, billing, bot_texts, broadcast,    # noqa: E402
                           channels, credentials, feed as feed_service, forcejoin,
-                          secrets_guard, settings)
+                          media_cache, secrets_guard, settings, visitors)
 from app.storage import db                                                    # noqa: E402
 from app.utils import esc, fmt_ts, human_size, money                          # noqa: E402
 from web import panels                                                        # noqa: E402
@@ -357,7 +358,8 @@ ADMIN_NAV = (
                       ("/admin/digest", "◫", "Weekly digest"))),
     ("💾 ডেটা", (("/admin/backup", "🗄", "Backup & move host"),
                    ("/admin/download", "⇩", "Exports"))),
-    ("📊 হিসাব", (("/admin/analytics", "▥", "Analytics"), ("/admin/self-test", "✓", "System health"),
+    ("📊 হিসাব", (("/admin/analytics", "▥", "Analytics"), ("/admin/visitors", "👣", "Visitors (live)"),
+                   ("/admin/self-test", "✓", "System health"),
                    ("/admin/logs", "≡", "Activity logs"),
                    ("/admin/audit", "🧾", "Admin audit"))),
     ("⚙ সেটিংস", (("/setup", "⚙", "Bot connection"), ("/admin/session", "◌", "Telegram session"),
@@ -374,6 +376,7 @@ ADMIN_QUICK = (
     ("◉", "Channels", "/admin/channels", "প্রতি স্টোরের আলাদা চ্যানেল"),
     ("📲", "Telegram session", "/admin/session", "বট ও ইউজারবট সংযোগ"),
     ("🧾", "Admin audit", "/admin/audit", "কে কী করল — সম্পূর্ণ হিসাব"),
+    ("👣", "Visitors (live)", "/admin/visitors", "এখন কে অনলাইনে, কোথা থেকে, কী দেখছে"),
 )
 
 # Two separate looks. Visitors: minimal black + gold. Admin / setup / sign-in: light paper
@@ -520,6 +523,8 @@ PAGE_BLURBS: dict[str, str] = {
     "/admin/orders": "পেমেন্ট অর্ডার — কে কী পাঠিয়েছে, অনুমোদন, বাতিল।",
     "/admin/links": "লিমিটেড লিংক — কতবার, কতজন, কে নিয়েছে তার হিসাব।",
     "/admin/analytics": "ফানেল, ডেড ফাইল, কনভার্শন — সংখ্যায় কনটেন্টের অবস্থা।",
+    "/admin/visitors": ("লাইভ ভিজিটর — এখন কে সাইটে, কোথা থেকে এসেছে, কোন পেজ দেখছে, "
+                        "কোন ভিডিও চালাচ্ছে, কে বট থেকে আর কে লিংক থেকে।"),
     "/admin/settings": "বট, সাইট, পেমেন্ট, ব্রডকাস্ট — সব সেটিং এক জায়গায়, রিস্টার্ট ছাড়াই।",
     "/admin/texts": "বটের প্রতিটি মেসেজের ভাষা নিজে লিখুন (বাংলা/English)।",
     "/admin/channels": "যেসব চ্যানেল বট ব্যবহার করে — ফোর্স-জয়েন গেট আর প্রতি স্টোরের ক্যাশ।",
@@ -615,9 +620,18 @@ _FEED_JS = """<script>(function(){
     if (v) v.pause();
     slide.classList.remove('playing');
   }
+  function showFail(slide, reason) {
+    slide.classList.add('failed');
+    var note = slide.querySelector('.fail .why');
+    if (note) note.textContent = '😕 ' + (reason || 'এই মুহূর্তে চলছে না');
+    var v = slide.querySelector('video');
+    if (v) { v.pause(); v.style.display = 'none'; }
+    clearTimeout(advance);
+  }
   function schedule(slide) {
     clearTimeout(advance);
     if (reduce) return;
+    if (slide && slide.classList.contains('failed')) return;   // the visitor decides
     var v = slide.querySelector('video');
     var wait = v ? 9000 : 5000;
     advance = setTimeout(function(){ go(current + 1); }, wait);
@@ -661,12 +675,41 @@ _FEED_JS = """<script>(function(){
       });
       v.addEventListener('ended', function(){ go(index + 1); });
       v.addEventListener('error', function(){
-        // No stream (bot restarting / media not cached yet): show the card and
-        // move on instead of leaving the visitor with a black rectangle.
-        slide.classList.add('failed');
-        v.style.display = 'none';
+        // Never “skip because it could not play”: first ask the site to fetch the
+        // file from Telegram right now, then play the very same slide. Only when
+        // that also fails does the card say why — and then the visitor chooses.
+        if (slide.dataset.asked === '1') { showFail(slide, 'ফাইলটা আনা যাচ্ছে না'); return; }
+        slide.dataset.asked = '1';
         clearTimeout(advance);
-        if (slides.length > 1) setTimeout(function(){ go(index + 1); }, 1400);
+        var note = slide.querySelector('.fail .why');
+        if (note) note.textContent = '📥 টেলিগ্রাম থেকে আনছি…';
+        v.style.display = '';
+        window.bfixfPrepare(slide.dataset.stream || v.dataset.src || v.getAttribute('src'), function(j){
+          if (j && j.ok) {
+            slide.dataset.asked = '';
+            v.style.display = '';
+            v.dataset.loaded = '';
+            v.setAttribute('src', window.bfixfFresh(slide.dataset.stream || v.getAttribute('src')));
+            v.load();
+            var p2 = v.play(); if (p2 && p2.catch) p2.catch(function(){});
+            slide.classList.remove('failed');
+            return;
+          }
+          showFail(slide, (j && j.reason) || 'এই মুহূর্তে চালানো যাচ্ছে না');
+        });
+      });
+      var retry = slide.querySelector('.fail .retry');
+      if (retry) retry.addEventListener('click', function(ev){
+        ev.preventDefault(); ev.stopPropagation();
+        slide.dataset.asked = '';
+        slide.classList.remove('failed');
+        if (v) { v.dataset.loaded = ''; v.style.display = ''; }
+        if (typeof focusSlide === 'function') focusSlide(slides.indexOf(slide));
+      });
+      var next = slide.querySelector('.fail .next');
+      if (next) next.addEventListener('click', function(ev){
+        ev.preventDefault(); ev.stopPropagation();
+        go(index + 1);
       });
     }
     slide.addEventListener('keydown', function(ev){
@@ -706,6 +749,22 @@ _FEED_JS = """<script>(function(){
 })();</script>"""
 
 
+#: Shared player helper. When a clip cannot start (mirror still being built, the
+#: owner's session offline, a mirror channel that moved…), the page asks the
+#: *server* to fetch it right then (`/media/<id>/prepare` → Telegram → disk) and
+#: plays it as soon as the bytes are here. Only if that also fails does the card
+#: explain why and offer “আবার চালান” / “পরেরটা” — never a silent skip.
+_PLAYER_HELPER_JS = """<script>window.bfixfPrepare = function(url, cb){
+  var base = (url || '').split('?')[0];
+  if (!base) { cb({ok:false, reason:''}); return; }
+  fetch(base + '/prepare', {cache:'no-store'})
+    .then(function(r){ return r.json(); })
+    .then(function(j){ cb(j || {ok:false, reason:''}); })
+    .catch(function(){ cb({ok:false, reason:'সার্ভারে যোগাযোগ করা যাচ্ছে না'}); });
+};
+window.bfixfFresh = function(url){ return (url || '').split('?')[0] + '?r=' + Date.now(); };
+</script>"""
+
 def _reel_slide(item: dict, bots: str, first: bool) -> str:
     """One slide of the auto-playing reel — video or photo, with a poster frame."""
     kind = item.get("media_kind") or "video"
@@ -725,13 +784,15 @@ def _reel_slide(item: dict, bots: str, first: bool) -> str:
     cta = (f'<div class="cta"><a href="{esc(link)}" target="_blank" rel="noopener">'
            f'▶ বটে পুরোটা দেখুন</a></div>') if link else ""
     sub = f'<span class="sub">{store}</span>' if store else ""
-    # If this slide ever fails to load (bot restarting, media not cached yet) the
-    # visitor sees a friendly card with a way out instead of a black rectangle.
-    fail = (f'<div class="fail"><span>😕 এটা এই মুহূর্তে লোড হলো না</span>'
+    # A slide that cannot start right away is *fetched*, not skipped: the card
+    # explains what is happening and the visitor can retry or move on by hand.
+    fail = (f'<div class="fail"><span class="why">😕 এটা এই মুহূর্তে লোড হলো না</span>'
             + (f'<a class="btn" href="{esc(link)}" target="_blank" rel="noopener">'
                f'🤖 বটে দেখুন</a>' if link else "")
-            + '<span>পরেরটায় যাচ্ছে…</span></div>')
-    return (f'<article class="clip" tabindex="0" data-key="{key}" data-media-kind="{kind}">'
+            + '<div class="row"><button type="button" class="btn retry">▶ আবার চালান</button>'
+              '<button type="button" class="btn grey next">⏭ পরেরটা</button></div></div>')
+    return (f'<article class="clip" tabindex="0" data-key="{key}" data-media-kind="{kind}" '
+            f'data-stream="{esc(stream)}">'
             f'<div class="loading">⏳</div>{media}'
             f'<div class="shade"></div>'
             f'<div class="cap"><b>{name}</b>{sub}{cta}</div>{fail}</article>')
@@ -759,7 +820,7 @@ def _feed_section(bots: str) -> str:
         '<div class="reel-progress"><i></i></div></div>'
         f'<div class="reel-dots">{dots}</div>'
         '<p class="reel-note">নিজে থেকেই চলছে · উপরে-নিচে স্ক্রল বা সোয়াইপ করুন · '
-        'ভিডিওতে ট্যাপ = প্লে/পজ</p></div>' + _FEED_JS)
+        'ভিডিওতে ট্যাপ = প্লে/পজ</p></div>' + _PLAYER_HELPER_JS + _FEED_JS)
 
 
 _WALL_JS = """<script>(function(){
@@ -770,54 +831,95 @@ _WALL_JS = """<script>(function(){
   var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   var conn = navigator.connection || {};
   var autoplay = wall.dataset.autoplay === '1' && !reduce && !conn.saveData;
-  function fail(cell){
-    cell.classList.add('failed');
-    var v = cell.querySelector('video'); if (v) v.remove();
-  }
-  function load(cell){
-    var m = cell.querySelector('video, img');
-    if (!m || m.dataset.loaded) return;
-    m.dataset.loaded = '1';
-    if (m.dataset.src) m.setAttribute('src', m.dataset.src);
-    m.addEventListener('loadeddata', function(){ cell.classList.add('ready'); });
-    m.addEventListener('load', function(){ cell.classList.add('ready'); });
-    m.addEventListener('error', function(){ fail(cell); });
-    if (m.tagName === 'IMG' && m.complete) cell.classList.add('ready');
-  }
+  function mediaOf(cell){ return cell.querySelector('video, img'); }
+  function why(cell, text){ var w = cell.querySelector('.fail .why'); if (w && text) w.textContent = text; }
+  function state(cell, name){ cell.classList.remove('loading','ready','failed'); if (name) cell.classList.add(name); }
+  function mention(cell, text){ var w = cell.querySelector('.fail .why'); if (w) w.textContent = text || ''; }
   function play(cell){
-    load(cell);
     var v = cell.querySelector('video');
     if (!v || !autoplay) return;
     v.muted = wall.dataset.muted !== '0';
     v.loop = wall.dataset.loop !== '0';
     var p = v.play();
-    if (p && p.catch) p.catch(function(){});   // autoplay denied → poster stays
+    if (p && p.catch) p.catch(function(){});
   }
   function stop(cell){ var v = cell.querySelector('video'); if (v) v.pause(); }
-  // All the cells of the wall are visible together, so they play together — that
-  // is the “3–4 clips at once” the page advertises, not one lonely video.
+  function load(cell, fresh){
+    var m = mediaOf(cell);
+    if (!m) return;
+    var url = m.dataset.src || m.getAttribute('src') || cell.dataset.stream || '';
+    if (!url) { fail(cell, 'লিংক পাওয়া যায়নি'); return; }
+    if (fresh) url = window.bfixfFresh(url);
+    if (m.dataset.busy === '1') return;
+    m.dataset.busy = '1';
+    var settled = false;
+    function good(){ settled = true; m.dataset.busy = '0'; state(cell, 'ready'); if (autoplay) play(cell); }
+    function bad(){
+      if (settled) return;
+      settled = true; m.dataset.busy = '0';
+      if (cell.dataset.asked !== '1') ask(cell); else fail(cell, 'ফাইলটা আনা যাচ্ছে না');
+    }
+    m.addEventListener('loadeddata', good, {once: true});
+    m.addEventListener('loadedmetadata', good, {once: true});
+    m.addEventListener('error', bad, {once: true});
+    m.setAttribute('src', url);
+    if (m.tagName === 'IMG' && m.complete && m.naturalWidth) good();
+  }
+  // The clip is not on this server yet → the site fetches it from Telegram now.
+  function ask(cell){
+    cell.dataset.asked = '1';
+    state(cell, 'loading');
+    mention(cell, '📥 টেলিগ্রাম থেকে আনছি…');
+    var stream = cell.dataset.stream || (mediaOf(cell) || {}).dataset && mediaOf(cell).dataset.src || '';
+    window.bfixfPrepare(stream, function(j){
+      if (j && j.ok) { mention(cell, ''); load(cell, true); return; }
+      fail(cell, (j && j.reason) || 'এখন চালানো যাচ্ছে না');
+    });
+  }
+  function fail(cell, reason){
+    state(cell, 'failed');
+    mention(cell, '😕 ' + (reason || 'চলছে না'));
+    var v = cell.querySelector('video'); if (v) v.pause();
+  }
+  function restart(cell){
+    var m = mediaOf(cell);
+    cell.dataset.asked = '';
+    if (m) { m.dataset.busy = '0'; m.dataset.loaded = ''; }
+    state(cell, 'loading');
+    mention(cell, '📥 আবার চেষ্টা করছি…');
+    ask(cell);
+  }
+  cells.forEach(function(cell){
+      var retry = cell.querySelector('.fail .retry');
+      if (retry) retry.addEventListener('click', function(ev){
+        ev.preventDefault(); ev.stopPropagation(); restart(cell);
+      });
+      cell.addEventListener('click', function(ev){
+        if (ev.target && ev.target.closest && ev.target.closest('a')) return;
+        if (ev.target && ev.target.closest && ev.target.closest('.retry')) return;
+        var v = cell.querySelector('video');
+        if (!v) return;
+        ev.preventDefault();
+        if (v.paused) { v.muted = wall.dataset.muted !== '0'; v.play().catch(function(){}); }
+        else v.pause();
+      });
+      var v = cell.querySelector('video');
+      if (v) v.addEventListener('ended', function(){ if (!v.loop) play(cell); });
+  });
+  // Every cell of the wall is meant to run *together* — load them all as soon as
+  // the row is on screen, then keep them playing while it stays visible.
   var io = new IntersectionObserver(function(entries){
     entries.forEach(function(entry){
-      if (entry.isIntersecting) play(entry.target); else stop(entry.target);
+      if (entry.isIntersecting) { load(entry.target); play(entry.target); }
+      else stop(entry.target);
     });
-  }, {threshold: 0.3});
-  cells.forEach(function(cell){
-    io.observe(cell);
-    cell.addEventListener('click', function(ev){
-      if (ev.target && ev.target.closest && ev.target.closest('a')) return;
-      var v = cell.querySelector('video');
-      if (!v) return;
-      ev.preventDefault();
-      if (v.paused) play(cell); else stop(cell);
-    });
-    var v = cell.querySelector('video');
-    if (v) v.addEventListener('ended', function(){ if (!v.loop) play(cell); });
-  });
+  }, {threshold: 0.25});
+  cells.forEach(function(cell){ io.observe(cell); });
   document.addEventListener('visibilitychange', function(){
     cells.forEach(function(cell){
       if (document.hidden) { stop(cell); return; }
       var box = cell.getBoundingClientRect();
-      if (box.top < window.innerHeight && box.bottom > 0) play(cell);
+      if (box.top < window.innerHeight && box.bottom > 0) { load(cell); play(cell); }
     });
   });
 })();</script>"""
@@ -866,11 +968,12 @@ def _feed_wall_section(bots: str) -> str:
                      f'{"src" if eager else "data-src"}="{esc(source)}" '
                      f'poster="{thumb}"></video>')
         cells.append(
-            f'<div class="cell" data-key="{key}">{media}'
+            f'<div class="cell" data-key="{key}" data-stream="{esc(source)}">{media}'
             f'<span class="pill badge2">{"🖼" if kind == "photo" else "🎬"}</span>'
             f'<span class="tag2">{name}{f" · {store}" if store else ""}</span>'
-            f'<span class="fail"><span>😕 লোড হলো না</span>'
-            f'<a class="btn" href="{esc(link)}" target="_blank" rel="noopener">🤖 বটে দেখুন</a>'
+            f'<span class="fail"><span class="why">😕 চলছে না</span>'
+            f'<button type="button" class="btn retry">▶ আবার চালান</button>'
+            f'<a class="btn grey" href="{esc(link)}" target="_blank" rel="noopener">🤖 বটে</a>'
             f'</span></div>')
     flags = (f'data-autoplay="{"1" if play["autoplay"] else "0"}" '
              f'data-muted="{"1" if play["muted"] else "0"}" '
@@ -882,7 +985,7 @@ def _feed_wall_section(bots: str) -> str:
             f'<div class="awall" {flags}>{"".join(cells)}</div>'
             '<p class="awall-note">নিজে থেকেই চলছে (মিউট) · যেকোনো একটা ট্যাপ করলে '
             'প্লে/পজ · 📱 মোবাইল ডেটা বাঁচাতে ছবিগুলো স্ক্রল করলেই লোড হয়</p>'
-            + _WALL_JS)
+            + _PLAYER_HELPER_JS + _WALL_JS)
 
 
 def _gallery_section(bots: str, limit: int = 12) -> str:
@@ -1177,6 +1280,43 @@ def create_app() -> FastAPI:
         finally:
             basepath.set_prefix("")
 
+    #: Requests that are never counted as “a page a visitor read”.
+    _TRACK_SKIP = ("/media/", "/reel/", "/inbox/", "/cover/", "/health", "/favicon",
+                   "/robots.txt", "/setup/status", "/admin/visitors.json")
+
+    @app.middleware("http")
+    async def track_visitors(request: Request, call_next):
+        """Analytics for the owner: who is here, from where, doing what.
+
+        One first-party cookie (`bf_vid`), no external service, nothing personal
+        beyond what the browser itself sends. The owner's own requests are flagged
+        as admin so they never inflate the visitor numbers.
+        """
+        path = request.url.path
+        started = time.time()
+        skip = any(path.startswith(prefix) for prefix in _TRACK_SKIP)
+        vid = ""
+        if not skip:
+            try:
+                if not visitors.is_bot(request.headers.get("user-agent") or ""):
+                    vid = visitors.ensure_visit(request, is_admin=_authed(request))
+            except Exception:
+                log.debug("visitor session skipped", exc_info=True)
+        response = await call_next(request)
+        if vid:
+            try:
+                visitors.touch(request, vid=vid, path="" if skip else path,
+                               status=int(getattr(response, "status_code", 200)),
+                               ms=int((time.time() - started) * 1000),
+                               event="login" if path == "/admin/login"
+                               and request.method == "POST" else "")
+                if not _authed(request) and visitors.valid_vid(vid):
+                    response.set_cookie(visitors.COOKIE, vid, max_age=30 * 86400,
+                                        httponly=True, samesite="lax")
+            except Exception:
+                log.debug("visitor tracking skipped", exc_info=True)
+        return response
+
     @app.middleware("http")
     async def setup_gate(request: Request, call_next):
         """Until the bot is configured, every page leads to the setup wizard."""
@@ -1298,6 +1438,22 @@ def create_app() -> FastAPI:
         disk (`chat_id = 0`).
         """
         from fastapi.responses import StreamingResponse
+        cached = feed_service.cached_size(row)
+        if cached:
+            # The bytes are already on disk (mirror download or a previous visitor):
+            # stream them straight away — this is what makes every clip play, even
+            # while Telegram is unreachable or a mirror is still being built.
+            try:
+                start, end = feed_service.parse_range(request.headers.get("range"), cached)
+            except ValueError:
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{cached}"})
+            return StreamingResponse(
+                feed_service.iter_cached(row, start, end), status_code=206,
+                media_type="video/mp4" if site_kind(row) == "video" else "image/jpeg",
+                headers={"Accept-Ranges": "bytes",
+                         "Content-Range": f"bytes {start}-{end}/{cached}",
+                         "Content-Length": str(end - start + 1),
+                         "Cache-Control": "public, max-age=3600"})
         if feed_service.is_demo(row):
             size = feed_service.local_size(row)
             if not size:
@@ -1339,6 +1495,10 @@ def create_app() -> FastAPI:
         return "photo" if kind == "photo" else "video"
 
     async def _thumb_response(row: dict, label: str):
+        cached_poster = feed_service.cached_thumb(row)
+        if cached_poster:
+            return Response(cached_poster, media_type="image/jpeg",
+                            headers={"Cache-Control": "public, max-age=3600"})
         if feed_service.is_demo(row):
             frame = feed_service.demo_frame(row)
             if frame:
@@ -1373,6 +1533,65 @@ def create_app() -> FastAPI:
             return Response("Not found", status_code=404)
         return await _thumb_response(row, f"file {file_id}")
 
+    #: One fetch per item at a time + a short cooldown, so a burst of visitors
+    #: never turns into a burst of Telegram downloads.
+    _PREPARE_LOCKS: dict[str, asyncio.Lock] = {}
+    _PREPARE_LAST: dict[str, float] = {}
+
+    async def _prepare_item(row: dict, label: str):
+        """Make sure this clip is playable *now*; returns (ok, size, reason)."""
+        size = feed_service.cached_size(row)
+        if size:
+            return True, size, ""
+        key = media_cache.cache_key(row)
+        lock = _PREPARE_LOCKS.setdefault(key, asyncio.Lock())
+        if lock.locked():
+            async with lock:                       # someone else is fetching it
+                size = feed_service.cached_size(row)
+            return (size > 0), size, media_cache.cache_problem(row)
+        async with lock:
+            size = feed_service.cached_size(row)
+            if size:
+                return True, size, ""
+            if time.time() - _PREPARE_LAST.get(key, 0) < 5:
+                return False, 0, media_cache.cache_problem(row) or "একটু পরে আবার চেষ্টা করুন"
+            _PREPARE_LAST[key] = time.time()
+            try:
+                size = await feed_service.prepare(row)
+            except Exception as exc:
+                log.debug("prepare %s failed: %s", label, exc)
+                size = 0
+            reason = media_cache.cache_problem(row) or ("" if size else "মিডিয়া এখন পড়া যাচ্ছে না")
+            if not size:
+                visitors.note(name="media_failed", file_id=int(row.get("id") or 0),
+                              detail=reason[:120])
+            return (size > 0), size, reason
+
+    @app.get("/media/{file_id}/prepare")
+    async def feed_prepare(request: Request, file_id: int):
+        """“চালান” on a clip the cache does not hold yet → fetch it, then play."""
+        row = db.file(file_id)
+        if not feed_service.eligible(row):
+            return JSONResponse({"ok": False, "reason": "এই মিডিয়া সাইটে দেখানো হয় না"},
+                                headers={"Cache-Control": "no-store"})
+        ok, size, reason = await _prepare_item(row, f"file {file_id}")
+        visitors.note(request, name="prepare" if ok else "media_failed", file_id=file_id,
+                      detail=(reason or "")[:120])
+        return JSONResponse({"ok": ok, "size": size, "reason": reason, "kind": "media"},
+                            headers={"Cache-Control": "no-store"})
+
+    @app.get("/reel/{pin_id}/prepare")
+    async def reel_prepare(request: Request, pin_id: int):
+        row = feed_service.eligible_pin(pin_id)
+        if not row:
+            return JSONResponse({"ok": False, "reason": "পিনটা পাওয়া যায়নি"},
+                                headers={"Cache-Control": "no-store"})
+        ok, size, reason = await _prepare_item(row, f"pin {pin_id}")
+        visitors.note(request, name="prepare" if ok else "media_failed", file_id=pin_id,
+                      detail=(reason or "")[:120])
+        return JSONResponse({"ok": ok, "size": size, "reason": reason, "kind": "reel"},
+                            headers={"Cache-Control": "no-store"})
+
     @app.get("/reel/{pin_id}")
     async def reel_media(request: Request, pin_id: int):
         """Stream a hand-picked reel item (pinned by the owner with /reel add)."""
@@ -1389,9 +1608,16 @@ def create_app() -> FastAPI:
         return await _thumb_response(pin, f"pin {pin_id}")
 
     @app.get("/reel/play/{key}")
-    async def reel_play(key: str):
+    async def reel_play(request: Request, key: str):
         """Tiny beacon the reel sends when a slide actually starts playing."""
         feed_service.note_play(key)
+        file_id = 0
+        if key.startswith("file:"):
+            try:
+                file_id = int(key.split(":", 1)[1])
+            except ValueError:
+                file_id = 0
+        visitors.note(request, name="media_play", file_id=file_id, detail=key[:60])
         return Response(status_code=204)
 
     @app.get("/inbox/{item_id}")
@@ -1454,7 +1680,7 @@ def create_app() -> FastAPI:
                         headers={"Cache-Control": "public, max-age=86400"})
 
     @app.get("/watch", response_class=HTMLResponse)
-    async def public_watch(item: str = "") -> str:
+    async def public_watch(request: Request, item: str = "") -> str:
         """Every free video & photo, with an instant inline player (no download)."""
         bots = _bot_username()
         items = feed_service.gallery(bots)
@@ -1463,6 +1689,14 @@ def create_app() -> FastAPI:
                                   "<p class='muted'>এখনো কিছু যোগ করা হয়নি — শীঘ্রই আসছে।</p>",
                           "/watch")
         chosen = next((row for row in items if row.get("key") == item), items[0])
+        if item:
+            file_id = 0
+            if str(item).startswith("file:"):
+                try:
+                    file_id = int(str(item).split(":", 1)[1])
+                except ValueError:
+                    file_id = 0
+            visitors.note(request, name="media_open", file_id=file_id, detail=str(item)[:40])
         # The hero obeys the same playback switches as the home-page wall (Admin →
         # Home page reel) instead of hard-coding autoplay: browsers only allow a
         # muted autoplay, and some owners prefer click-to-play.
@@ -1476,10 +1710,12 @@ def create_app() -> FastAPI:
         if play["loop"]:
             attrs.append("loop")
         if chosen.get("media_kind") == "photo":
-            hero = (f'<img id="hero-media" src="{esc(chosen.get("stream") or "")}" '
+            hero = (f'<img id="hero-media" data-stream="{esc(chosen.get("stream") or "")}" '
+                    f'src="{esc(chosen.get("stream") or "")}" '
                     f'alt="{esc(chosen.get("name") or "")}">')
         else:
-            hero = (f'<video {" ".join(attrs)} '
+            hero = (f'<video {" ".join(attrs)} id="hero-media" '
+                    f'data-stream="{esc(chosen.get("stream") or "")}" '
                     f'poster="{esc(chosen.get("thumb") or "")}" '
                     f'src="{esc(chosen.get("stream") or "")}"></video>')
         bot_link = chosen.get("bot_link") or ""
@@ -1501,6 +1737,7 @@ def create_app() -> FastAPI:
           {f'<a class="btn" href="{esc(bot_link)}" target="_blank" rel="noopener">🤖 বটে পূর্ণ কোয়ালিটি</a>' if bot_link else ''}
         </div>
         <div class="watch-hero">{hero}</div>
+        <p class="note" id="hero-status" style="display:none"></p>
         <p class="muted" id="watch-title" style="margin-top:10px">{esc(chosen.get("name") or "")}
         {f'· {esc(chosen.get("store_name") or "")}' if chosen.get("store_name") else ''}</p>
         <div class="wall">{''.join(tiles)}</div>
@@ -1536,11 +1773,49 @@ def create_app() -> FastAPI:
                 location.pathname + '?item=' + encodeURIComponent(tile.dataset.stream));
               fetch('reel/play/' + encodeURIComponent('file:' + stream.split('/')[1]),
                     {{keepalive:true, cache:'no-store'}}).catch(function(){{}});
+              heroReady(stream);
             }});
           }});
+          // If the hero cannot play, the site fetches the file from Telegram and
+          // plays it — the visitor never sees a dead player.
+          var heroStatus = document.getElementById('hero-status');
+          function say(text) {{
+            if (!heroStatus) return;
+            heroStatus.style.display = text ? '' : 'none';
+            heroStatus.textContent = text || '';
+          }}
+          function heroReady(stream) {{
+            var hero = document.getElementById('hero-media');
+            if (!hero) return;
+            if (hero.tagName === 'IMG') {{
+              hero.onerror = function(){{
+                say('📥 ছবিটা টেলিগ্রাম থেকে আনছি…');
+                window.bfixfPrepare(stream, function(j){{
+                  if (j && j.ok) {{ hero.src = window.bfixfFresh(stream); say(''); }}
+                  else say('😕 ' + ((j && j.reason) || 'ছবিটা আনা যাচ্ছে না'));
+                }});
+              }};
+              return;
+            }}
+            hero.onerror = function(){{
+              say('📥 ভিডিওটা টেলিগ্রাম থেকে আনছি… প্রথমবার একটু সময় লাগতে পারে');
+              window.bfixfPrepare(stream, function(j){{
+                if (j && j.ok) {{
+                  hero.src = window.bfixfFresh(stream);
+                  hero.load();
+                  var p = hero.play(); if (p && p.catch) p.catch(function(){{}});
+                  say('');
+                }} else {{
+                  say('😕 ' + ((j && j.reason) || 'এই মুহূর্তে চালানো যাচ্ছে না'));
+                }}
+              }});
+            }};
+          }}
+          heroReady({esc(chosen.get("stream") or "")!r}.replace(/^[/]/, ''));
         </script>
         """
-        return layout("Watch", body, "/watch")
+        return layout("Watch", body.replace("</script>", "</script>" + _PLAYER_HELPER_JS, 1)
+                      if _PLAYER_HELPER_JS not in body else body, "/watch")
 
     @app.get("/help", response_class=HTMLResponse)
     async def public_help() -> str:
@@ -1596,9 +1871,10 @@ def create_app() -> FastAPI:
         return layout("Stores", f"<h3>🏪 সব স্টোর</h3>{store_cards(db.all_stores())}", "/stores")
 
     @app.get("/search", response_class=HTMLResponse)
-    async def public_search(q: str = "") -> str:
+    async def public_search(request: Request, q: str = "") -> str:
         rows = []
         if q.strip():
+            visitors.note(request, name="search", detail=q.strip()[:80])
             for store in db.all_stores():
                 if store["is_premium"]:
                     continue
@@ -1630,10 +1906,12 @@ def create_app() -> FastAPI:
         return None
 
     @app.get("/s/{slug}", response_class=HTMLResponse)
-    async def public_store(slug: str) -> str:
+    async def public_store(request: Request, slug: str) -> str:
         store = _find_store(slug)
         if store is None:
             return HTMLResponse(layout("Not found", "<h3>স্টোরটি পাওয়া যায়নি</h3>"), status_code=404)
+        visitors.note(request, name="store_open", store_id=int(store["id"]),
+                      detail=(store.get("name") or "")[:60])
         stats = db.store_stats(store["id"])
         link = deep_link(f"s{store['id']}")
         if store["is_premium"]:
@@ -2002,12 +2280,20 @@ def create_app() -> FastAPI:
         # ---- design system pieces (web/adminui.py) -------------------------
         currency = settings.get_str("CURRENCY", "৳")
         brand = settings.get_str("WEB_TITLE", "Store Bot") or "Store Bot"
+        try:
+            live_visitors = visitors.live(5)
+        except Exception:                             # analytics must never block a page
+            live_visitors = {"online": 0, "views": 0}
         kpis = ui.kpi_row(
             ui.kpi("ইউজার", stats["users"], sub=f"গ্রান্ট <b>{stats['grants']}</b>"),
             ui.kpi("ভিডিও/ফাইল", stats["files"], sub=f"স্টোর <b>{stats['stores']}</b>"),
-            ui.kpi("ভিউ", stats["views"], sub=f"টিকেট <b>{stats['tickets_open']}</b>"),
+            ui.kpi("ভিউ", stats["views"], sub=f"টিকিট <b>{stats['tickets_open']}</b>"),
             ui.kpi("আয়", money(revenue["total"], currency),
                    sub=f"⏳ পেন্ডিং <b>{revenue['pending']}</b>"),
+            ui.kpi("👣 এখন অনলাইন", live_visitors.get("online", 0),
+                   sub=f"৫ মিনিটে <b>{live_visitors.get('views', 0)}</b> পেজ · "
+                       "<a href='/admin/visitors'>লাইভ দেখুন</a>",
+                   dark=bool(live_visitors.get("online"))),
             ui.kpi("আজকের পাঠানো", broadcast_today(stats),
                    sub=f"বট <b>{'অনলাইন' if runtime.bot_online() else 'অফলাইন'}</b>"),
         )
@@ -2467,9 +2753,10 @@ def create_app() -> FastAPI:
                                 status_code=303)
 
     @app.get("/draft/{token}", response_class=HTMLResponse)
-    async def public_draft(token: str):
+    async def public_draft(request: Request, token: str):
         """A read-only look at a draft — for a colleague, before anything is sent."""
         campaign = db.campaign_by_link(token)
+        visitors.note(request, name="draft_open", detail=str(token)[:40])
         if campaign is None:
             return layout("খসড়া নেই", "<h2>🔍 এই খসড়ার লিংক আর কাজ করে না</h2>"
                                       "<p class='muted'>সম্ভবত মুছে ফেলা হয়েছে।</p>", "/")
@@ -4334,6 +4621,140 @@ def create_app() -> FastAPI:
         checks = await panels.self_test()
         note = f'<div class="flash">{esc(flash)}</div>' if flash else ""
         return layout("Self test", note + panels.self_test_body(checks), "/admin/self-test")
+
+    # -------------------------------------------------------------- visitors
+    @app.get("/admin/visitors", response_class=HTMLResponse)
+    async def admin_visitors(request: Request, days: int = 14, tab: str = "live"):
+        """📈 Live visitor analytics — who is here now and what they are doing."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        body = panels.visitors_body(days=days, tab=tab or "live")
+        return layout("Visitors", body, "/admin/visitors")
+
+    @app.get("/admin/visitors.json")
+    async def admin_visitors_json(request: Request, minutes: int = 5):
+        """The live numbers, for the page's own auto-refresh (and any script)."""
+        blocked = _guard(request)
+        if blocked:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        data = visitors.live(minutes=minutes)
+        return JSONResponse({
+            "online": data["online"], "window_minutes": data["window_minutes"],
+            "views": data["views"], "top_source": data.get("source"),
+            "top_country": data.get("country"), "top_device": data.get("device"),
+            "rows": [{"vid": row.get("vid"), "page": row.get("landing"),
+                      "device": row.get("device"), "browser": row.get("browser"),
+                      "country": row.get("country"), "idle": row.get("idle"),
+                      "user_id": row.get("user_id"), "ip": row.get("ip")}
+                     for row in data["rows"]],
+            "now": int(time.time()),
+        }, headers={"Cache-Control": "no-store"})
+
+    @app.get("/admin/visitors.csv")
+    async def admin_visitors_csv(request: Request, days: int = 30):
+        """A spreadsheet of the visits — for the owner's own record keeping."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        rows = visitors.csv_rows(days=days)
+        body = "\r\n".join(",".join('"' + str(cell).replace('"', '""') + '"' for cell in row)
+                            for row in rows)
+        return Response("\ufeff" + body, media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="visitors-{days}d.csv"'})
+
+    @app.post("/admin/visitors/prune")
+    async def admin_visitors_prune(request: Request, days: int = Form(90)):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        report = visitors.prune(days=max(1, min(3650, int(days or 90))))
+        audit_service.record("visitors_pruned", detail=f"{report['removed']} rows / {days} days")
+        return RedirectResponse(
+            f"/admin/visitors?flash=🧹 {report['removed']}টি পুরোনো রেকর্ড মুছে ফেলা হয়েছে",
+            status_code=303)
+
+    @app.get("/admin/visitors/media/{file_id}", response_class=HTMLResponse)
+    async def admin_visitor_media(request: Request, file_id: int):
+        """Who watched this particular video — names, times, devices."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        row = db.file(file_id)
+        events = db.visitors.media_watchers(file_id, limit=200)
+        body = (f"<div class='card'><h3>🎬 {esc((row or {}).get('name') or f'ফাইল #{file_id}')}</h3>"
+                f"<p class='muted'>এই মিডিয়া কে কে চালিয়েছে / খুলেছে</p>"
+                + ui.table(["সময়", " ভিজিটর", "ইউজার", "কী করল", "পেজ"],
+                           [[fmt_ts(row2.get("ts")), f"<a href='/admin/visitors/"
+                             f"{esc(row2.get('vid') or '')}'>{esc(str(row2.get('vid') or ''))[:8]}…</a>",
+                             esc(row2.get("user_name") or (row2.get("user_id") and
+                                                           f"#{row2['user_id']}") or "—"),
+                             esc(visitors.EVENT_LABELS.get(row2.get("name") or "",
+                                                           row2.get("name") or "")),
+                             f"<code>{esc(row2.get('path') or '')}</code>"]
+                            for row2 in events],
+                           empty_row="এখনো কেউ দেখেনি")
+                + "</div>")
+        return layout("Visitors", body, "/admin/visitors")
+
+    @app.get("/admin/visitors/{vid}", response_class=HTMLResponse)
+    async def admin_visitor_detail(request: Request, vid: str):
+        """One visitor's whole stay: every page, every action, in order."""
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        data = visitors.who_is_this(vid)
+        visit = data.get("visit") or {}
+        if not visit:
+            return layout("Visitors", ui.empty("🔍", "এই ভিজিটর আর নেই",
+                                               "৯০ দিনের পুরোনো রেকর্ড মুছে যেতে পারে।"),
+                          "/admin/visitors")
+        who = visit.get("user_id") and (f"#{visit['user_id']}") or "অজানা ভিজিটর"
+        head = ui.kpi_row(
+            ui.kpi("পেজভিউ", visit.get("pageviews") or 0),
+            ui.kpi("শুরু", fmt_ts(visit.get("started_at"), "%d %b %H:%M")),
+            ui.kpi("সর্বশেষ", fmt_ts(visit.get("last_seen"), "%d %b %H:%M")),
+            ui.kpi("ডিভাইস", visit.get("device") or "—", sub=visit.get("browser") or ""),
+        )
+        pages = ui.timeline([(fmt_ts(row.get("ts"), "%H:%M:%S"),
+                              f"<code>{esc(row.get('path') or '')}</code> "
+                              f"<span class='muted'>{int(row.get('ms') or 0)} ms · "
+                              f"{int(row.get('status') or 0)}</span>")
+                             for row in data.get("pages") or []]) or ui.empty("📄", "পেজ নেই")
+        events = ui.timeline([(fmt_ts(row.get("ts"), "%H:%M:%S"),
+                               esc(visitors.EVENT_LABELS.get(row.get("name") or "",
+                                                             row.get("name") or ""))
+                               + f" <span class='muted'>{esc(row.get('detail') or '')}</span>")
+                              for row in data.get("events") or []]) or ui.empty("🕐", "কাজ নেই")
+        body = (head
+                + f"""<div class="card"><h3>👤 {esc(who)}</h3>
+                <div class="kv">
+                  <div><span>ভিজিট আইডি</span><b><code>{esc(vid)}</code></b></div>
+                  <div><span>আইপি</span><b><code>{esc(visit.get('ip') or '—')}</code></b></div>
+                  <div><span>দেশ/ভাষা</span><b>{esc(visit.get('country') or '—')}</b></div>
+                  <div><span>সোর্স</span><b>{esc(visit.get('source') or '—')}</b></div>
+                  <div><span>রেফারার</span><b>{esc((visit.get('referrer') or '—')[:80])}</b></div>
+                  <div><span>ল্যান্ডিং</span><b><code>{esc(visit.get('landing') or '')}</code></b></div>
+                  <div><span>ব্রাউজার</span><b>{esc(visit.get('os') or '')} · {esc(visit.get('browser') or '')}</b></div>
+                  <div><span>ইউজার-এজেন্ট</span><b>{esc((visit.get('user_agent') or '')[:90])}</b></div>
+                </div>
+                <form method=post action="/admin/visitors/{esc(vid)}/forget">
+                  <button class="btn bad">🗑 এই ভিজিটরকে মুছে ফেলুন</button>
+                </form></div>
+                <div class="card"><h3>📄 পেজের ধারাবাহিকতা</h3>{pages}</div>
+                <div class="card"><h3>🕐 কাজ</h3>{events}</div>""")
+        return layout("Visitors", body, "/admin/visitors")
+
+    @app.post("/admin/visitors/{vid}/forget")
+    async def admin_visitor_forget(request: Request, vid: str):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        removed = visitors.forget(vid)
+        audit_service.record("visitor_forgotten", ref=vid, detail=f"{removed} rows")
+        return RedirectResponse("/admin/visitors?flash=🗑 রেকর্ড মুছে ফেলা হয়েছে",
+                                status_code=303)
 
     @app.get("/admin/audit", response_class=HTMLResponse)
     async def admin_audit(request: Request, name: str = "", days: int = 30):

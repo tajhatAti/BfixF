@@ -107,6 +107,23 @@ async def backup_loop() -> None:
         await asyncio.sleep(600)
 
 
+async def analytics_loop() -> None:
+    """Once a day: prune old visitor records and keep the media cache tidy."""
+    from app.services import media_cache, visitors
+    while True:
+        try:
+            today = local_date_str()
+            if db.get_meta("last_analytics_prune") != today:
+                db.set_meta("last_analytics_prune", today)
+                report = visitors.prune(days=settings.get_int("VISITOR_KEEP_DAYS", 90) or 90)
+                if report.get("removed"):
+                    log.info("visitor analytics pruned: %s old rows", report["removed"])
+                media_cache._prune_cache()
+        except Exception as exc:
+            log.debug("analytics loop error: %s", exc)
+        await asyncio.sleep(3600)
+
+
 async def reminder_loop() -> None:
     """Once a day, nudge users whose premium access is about to end."""
     while True:
@@ -371,6 +388,7 @@ def start_all() -> list[asyncio.Task]:
         spawn(mirror_loop()),
         spawn(digest_loop()),
         spawn(owner_report_loop()),
+        spawn(analytics_loop()),
     ]
     log.info("Started %s background workers", len(tasks))
     return tasks

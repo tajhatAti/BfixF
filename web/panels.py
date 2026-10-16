@@ -754,3 +754,211 @@ def users_tools_body(total: int = 0) -> str:
 
 def now_label() -> str:
     return fmt_ts(time.time(), "%d %b %Y %H:%M")
+
+
+# ------------------------------------------------------------------ visitors
+def _ago(seconds) -> str:
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return "—"
+    if seconds < 60:
+        return f"{max(1, seconds)} সেকেন্ড আগে"
+    if seconds < 3600:
+        return f"{seconds // 60} মিনিট আগে"
+    if seconds < 86400:
+        return f"{seconds // 3600} ঘণ্টা আগে"
+    return f"{seconds // 86400} দিন আগে"
+
+
+def _flag(code: str) -> str:
+    code = (code or "").strip().upper()
+    if len(code) == 2 and code.isalpha():
+        base = 0x1F1E6
+        return "".join(chr(base + (ord(ch) - ord("A"))) for ch in code)
+    return "🌐"
+
+
+def live_visitors_card(live: dict) -> str:
+    """“এখন কে অনলাইনে” — the part the owner refreshes all day long."""
+    rows = []
+    for row in live.get("rows") or []:
+        who = row.get("user_name") or row.get("user_username") or ""
+        if row.get("user_id"):
+            who = f"@{row['user_username']}" if row.get("user_username") else (who or f"#{row['user_id']}")
+        else:
+            who = "<span class='muted'>অজানা ভিজিটর</span>"
+        rows.append([
+            who,
+            f"<code>{esc(visitors_page(row.get('landing') or '/'))}</code>",
+            esc(row.get("device") or "—") + f" · {esc(row.get('browser') or '—')}",
+            f"{_flag(row.get('country'))} {esc(visitors_ip(row.get('ip')))}",
+            _ago(row.get("idle")),
+            f"<a class='btn grey' href='/admin/visitors/{esc(row.get('vid') or '')}'>🔎</a>",
+        ])
+    table = ui.table(["কে", "কোন পেজে", "ডিভাইস", "কোথা থেকে", "সর্বশেষ", ""], rows,
+                     empty_row="এখন কেউ সাইটে নেই")
+    return f"""
+    <div class="card" id="live-visitors">
+      <h3>🟢 এখন অনলাইনে <span class="pill">{live.get('online', 0)} জন</span></h3>
+      <p class="muted">শেষ {live.get('window_minutes', 5)} মিনিটে যারা সাইটে এসেছেন — পেজ বদলালেই
+         এখানে সাথে সাথে দেখা যাবে। নিজের ভিজিট আলাদা রাখা হয়, তাই সংখ্যাটা আসল ভিজিটরের।</p>
+      {table}
+    </div>"""
+
+
+def visitors_ip(value) -> str:
+    """Masked IP — the owner sees the network, never the whole address by default."""
+    from app.services import visitors as analytics
+    return analytics.masked_ip(str(value or ""))
+
+
+def visitors_page(path: str) -> str:
+    """`/s/cinema-house` → `cinema-house` — enough to recognise the page."""
+    text = str(path or "/")
+    return text if len(text) <= 42 else text[:39] + "…"
+
+
+def visitors_body(days: int = 14, tab: str = "live") -> str:
+    """📈 ভিজিটর — live visitors, today, top pages/media and the event stream."""
+    from app.services import visitors as analytics
+    data = analytics.overview(days=days)
+    live = data["live"]
+    today = data["today"]
+    totals = data["totals"]
+
+    tiles = ui.kpi_row(
+        ui.kpi("🟢 এখন অনলাইন", live.get("online", 0), sub="এই মুহূর্তে সাইটে",
+               dark=bool(live.get("online"))),
+        ui.kpi("👣 আজকের ভিজিটর", today.get("people", 0),
+               sub=f"{today.get('new_people', 0)} জন নতুন · {today.get('visits', 0)} ভিজিট"),
+        ui.kpi("📄 আজকের পেজভিউ", today.get("views", 0), sub=f"{today.get('events', 0)} কাজ"),
+        ui.kpi("🤖 বট ইউজার", data.get("bot_users", 0), sub="টেলিগ্রামে রেজিস্টার্ড"),
+        ui.kpi("🔗 লিংকড ভিজিটর", data.get("linked_users") and len(data["linked_users"]) or 0,
+               sub="বট ইউজার + ওয়েবসাইট"),
+    )
+
+    live_card = live_visitors_card(live)
+
+    # ---------------------------------------------------------------- today
+    start_of_day = time.strftime("%Y-%m-%d")
+    day_rows = []
+    for row in data.get("visits") or []:
+        start = time.strftime("%d %b %H:%M", time.localtime(float(row.get("started_at") or 0)))
+        if row.get("started_at") and time.strftime("%Y-%m-%d", time.localtime(
+                float(row['started_at']))) != start_of_day:
+            continue
+        who = row.get("user_name") or (f"@{row['user_username']}" if row.get("user_username")
+                                       else "<span class='muted'>অজানা</span>")
+        day_rows.append([
+            f"<a href='/admin/visitors/{esc(row.get('vid') or '')}'>{esc(str(row.get('vid') or ''))[:8]}…</a>",
+            who,
+            start,
+            f"{int(float(row.get('last_seen') or 0) - float(row.get('started_at') or 0))} সেকেন্ড",
+            str(row.get("pageviews") or 0),
+            esc(row.get("source") or "—"),
+            f"{_flag(row.get('country'))} {esc(row.get('device') or '')}",
+            f"<code>{esc(visitors_ip(row.get('ip')))}</code>",
+        ])
+    today_table = ui.table(["ভিজিট", "কে", "শুরু", "সময়", "পেজ", "সোর্স", "ডিভাইস",
+                            "আইপি (মাস্ক করা)"], day_rows,
+                           empty_row="আজ এখনো কেউ আসেনি")
+
+    # ------------------------------------------------------- days / chart
+    series = data.get("series") or []
+    peak = max([row["visitors"] for row in series] or [1]) or 1
+    chart = "".join(
+        f"<div class='bar' title='{row['day']}: {row['visitors']} ভিজিটর'>"
+        f"<i style='height:{max(4, int(row['visitors'] / peak * 100))}%'></i>"
+        f"<span>{row['day'][8:]}</span></div>" for row in series)
+    days_table = ui.table(
+        ["দিন", "ভিজিটর", "পেজভিউ", "কাজ"],
+        [[row["day"], row["visitors"], row["views"], row["events"]] for row in reversed(series)],
+        empty_row="এখনো কোনো ডেটা নেই")
+
+    top_pages = ui.table(["পেজ", "বার খোলা", "কতজন"],
+                         [[f"<code>{esc(row['path'])}</code>", row["hits"], row["people"]]
+                          for row in data.get("top_pages") or []],
+                         empty_row="কিছু নেই")
+    media_rows = []
+    for row in data.get("top_media") or []:
+        media_rows.append([
+            f"🎬 {esc(row.get('name') or '')}",
+            f"<span class='pill'>{esc(row.get('kind') or '')}</span>",
+            row.get("plays") or 0,
+            row.get("people") or 0,
+            f"<a class='btn grey' href='/admin/visitors/media/{int(row.get('file_id') or 0)}'>🔎 কারা দেখল</a>",
+        ])
+    top_media = ui.table(["মিডিয়া", "ধরন", "চালানো", "কতজন", ""], media_rows,
+                         empty_row="এখনো কেউ ভিডিও চালায়নি")
+    sources = ui.table(["সোর্স", "ভিজিটর"],
+                       [[esc(row["source"] or "—"), row["people"]]
+                        for row in data.get("top_sources") or []], empty_row="কিছু নেই")
+    countries = ui.table(["দেশ", "ভিজিটর"],
+                         [[f"{_flag(row['country'])} {esc(row['country'])}", row["people"]]
+                          for row in data.get("top_countries") or []],
+                         empty_row="দেশ শনাক্ত হয়নি")
+    devices = ui.table(["ডিভাইস", "ভিজিটর"],
+                       [[esc(row["device"] or "—"), row["people"]]
+                        for row in data.get("top_devices") or []], empty_row="কিছু নেই")
+    linked = ui.table(
+        ["বট ইউজার", "ভিজিটর আইডি", "সর্বশেষ", "কোথা থেকে", "ল্যান্ডিং"],
+        [[esc(row.get("user_name") or f"#{row.get('user_id')}"),
+          f"<a href='/admin/visitors/{esc(row.get('vid') or '')}'>{esc(str(row.get('vid') or ''))[:8]}…</a>",
+          _ago(time.time() - float(row.get("last_seen") or 0)),
+          esc(row.get("source") or "—"), f"<code>{esc(row.get('landing') or '')}</code>"]
+         for row in data.get("linked_users") or []],
+        empty_row="এখনো কোনো বট ইউজারকে শনাক্ত করা যায়নি")
+
+    events = ui.timeline([
+        (time.strftime("%d %b %H:%M", time.localtime(float(row.get("ts") or 0))),
+         f"{esc(analytics.EVENT_LABELS.get(row.get('name') or '', row.get('name') or ''))}"
+         f" · <span class='muted'>{esc(row.get('path') or '')} "
+         f"{esc(row.get('detail') or '')}</span>"
+         + (f" · <b>{esc(row.get('user_name') or '')}</b>" if row.get("user_name") else ""))
+        for row in data.get("events") or []]) or ui.empty("🕐", "এখনো কোনো কাজ রেকর্ড হয়নি")
+
+    tabs = ui.tabs([("🟢 লাইভ", "/admin/visitors"),
+                    ("📅 আজ", "/admin/visitors?tab=today"),
+                    ("🎬 পেজ ও মিডিয়া", "/admin/visitors?tab=content"),
+                    ("👥 কারা এসেছে", "/admin/visitors?tab=who"),
+                    ("📊 সব সময়", "/admin/visitors?tab=all")],
+                   active=("/admin/visitors" if tab == "live" else f"/admin/visitors?tab={tab}"))
+
+    if tab == "today":
+        middle = f'<div class="card"><h3>📅 আজকের ভিজিটর ({start_of_day})</h3>{today_table}</div>'
+    elif tab == "content":
+        middle = (f'<div class="card"><h3>📄 সবচেয়ে বেশি খোলা পেজ</h3>{top_pages}</div>'
+                  f'<div class="card"><h3>🎬 সবচেয়ে বেশি চলা মিডিয়া</h3>{top_media}</div>')
+    elif tab == "who":
+        middle = (f'<div class="card"><h3>👥 ব্যক্তিগত ভিজিটর</h3>{linked}</div>'
+                  f'<div class="card"><h3>📱 কোন ডিভাইস</h3>{devices}</div>'
+                  f'<div class="card"><h3>🌍 কোন দেশ থেকে</h3>{countries}</div>')
+    elif tab == "all":
+        middle = (f'<div class="card"><h3>📊 দিন অনুযায়ী</h3><div class="visitors-chart">{chart}</div>'
+                  f'{days_table}</div>'
+                  f'<div class="card"><h3>🔗 কোথা থেকে এসেছে</h3>{sources}</div>')
+    else:
+        middle = (live_card
+                  + f'<div class="card"><h3>📅 আজকের রেকর্ড</h3>{today_table}</div>'
+                  + f'<div class="card"><h3>🎬 এখন যা চলছে/চালানো হয়েছে</h3>{top_media}</div>')
+
+    return f"""
+    {tiles}
+    {tabs}
+    <p class="muted">সব সময় মোট <b>{totals.get('visits', 0)}</b> ভিজিট ·
+      <b>{totals.get('people', 0)}</b> জন ভিজিটর · <b>{totals.get('views', 0)}</b> পেজভিউ ·
+      <b>{totals.get('events', 0)}</b> কাজ
+      {('· শুরু ' + fmt_ts(totals.get('first_at')) if totals.get('first_at') else '')}
+      · <a href="/admin/visitors.csv">⬇ CSV</a> · <a href="/admin/visitors.json">🔄 লাইভ JSON</a></p>
+    {middle}
+    <div class="card"><h3>🕐 সাম্প্রতিক কাজ</h3>{events}</div>
+    <div class="card">
+      <h3>🧹 পুরোনো ডেটা</h3>
+      <p class="muted">৯০ দিনের পুরোনোটাই নিজে থেকে মুছে যায় (গোপনীয়তা + গতি দুটোর জন্যই)।</p>
+      <form method=post action="/admin/visitors/prune">
+        <label>কত দিন রাখবেন?</label>
+        <input name="days" type="number" value="90" min="1" max="3650">
+        <button class="btn grey">🧹 ছোট করে ফেলুন</button>
+      </form>
+    </div>"""
