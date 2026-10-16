@@ -1391,6 +1391,8 @@ def test_a_standalone_bots_user_list_merges_into_the_panel(client, tmp_path):
     assert "flash=" in location and "orphan" not in location
     from urllib.parse import unquote_plus
     assert "যোগ করা হয়েছে" in unquote_plus(location)      # মেসেজটা স্পষ্ট
+    assert "নতুন ২" in unquote_plus(location)
+    assert "1 স্টোর" in unquote_plus(location)            # স্টোরের আসল সংখ্যাটাও দেখায়
     assert [row["name"] for row in db.all_stores()] == ["Living store"]   # স্টোর অটুট
     assert db.user(USER_ID) is not None                   # বর্তমান ইউজারও অটুট
     assert db.user(7001) is not None and db.user(7002) is not None

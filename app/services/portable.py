@@ -551,11 +551,11 @@ def _apply_users_import(raw: bytes, source: str) -> dict:
         if _int_or_zero(values.get("blocked")):
             db.ban_user(uid, "পুরোনো বটের তালিকায় ব্লকড", 0)
             blocked += 1
-    after = _counts(str(db.path)).get("users", 0)
+    after = _counts(str(db.path))
     log.info("user list imported from %s: +%s new, %s updated", source, added, updated)
     return {"ok": True, "kind": KIND_USERS, "source": source, "merge": True,
             "imported": {"added": added, "updated": updated, "blocked": blocked},
-            "counts_before": {"users": before}, "counts_after": {"users": after},
+            "counts_before": {"users": before}, "counts_after": after,
             "safety_copy": "", "credentials_included": False,
             "created_at_text": ""}
 
