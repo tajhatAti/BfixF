@@ -1222,6 +1222,7 @@ def create_app() -> FastAPI:
         # credentials may have come back with the database → the bot can start now.
         try:
             credentials.load()
+            credentials.poke()          # wake run.bot_worker without a restart
         except Exception:
             log.debug("credential reload after restore failed", exc_info=True)
         return RedirectResponse("admin", status_code=303)

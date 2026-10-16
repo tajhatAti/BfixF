@@ -226,6 +226,7 @@ async def restore_confirm(event, rest: str) -> None:
     try:
         from app.services import credentials
         credentials.load()
+        credentials.poke()
     except Exception:
         log.debug("credential reload after restore failed", exc_info=True)
     after = report.get("counts_after") or {}

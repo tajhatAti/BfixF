@@ -81,6 +81,22 @@ def load() -> bool:
     return ok
 
 
+def poke() -> None:
+    """Wake `run.bot_worker` after credentials appeared (used by the backup restore).
+
+    `bot_worker` clears the event before waiting, so a wake-up that lands in that
+    tiny window would be lost and the bot would sit idle until a restart. Setting
+    the flag twice (now, and a moment later) makes that impossible.
+    """
+    event = _event()
+    event.set()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.call_later(1.5, event.set)
+
+
 def is_configured() -> bool:
     return bool(cfg.BOT_TOKEN and cfg.API_HASH and cfg.API_ID and cfg.ADMIN_IDS
                 and TOKEN_RE.match(cfg.BOT_TOKEN))

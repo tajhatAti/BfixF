@@ -148,3 +148,25 @@ def test_the_migration_checklist_covers_the_real_steps():
     assert "/restore" in steps or "restore" in steps
     assert "setup" in steps                # token/API id when the backup has none
     assert "health" in steps or "self-test" in steps
+
+
+@pytest.mark.asyncio
+async def test_a_restore_wakes_the_bot_worker(tmp_path, monkeypatch):
+    """নতুন হোস্টে রিস্টোরের পর বট নিজেই চালু হয় — রিস্টার্ট লাগে না।"""
+    from app.services import credentials
+    monkeypatch.setattr(cfg, "BACKUP_DIR", str(tmp_path / "backups"))
+    db.bind(str(tmp_path / "wake.sqlite3"))
+    settings._cache.clear()
+    monkeypatch.setattr(cfg, "BOT_TOKEN", "")
+    monkeypatch.setattr(cfg, "API_ID", 0)
+    monkeypatch.setattr(cfg, "API_HASH", "")
+    monkeypatch.setattr(cfg, "ADMIN_IDS", [])
+    assert credentials.is_configured() is False
+
+    db.set_meta("cred:BOT_TOKEN", "1234567890:" + "A" * 35)
+    db.set_meta("cred:API_ID", "12345")
+    db.set_meta("cred:API_HASH", "0" * 32)
+    db.set_meta("cred:ADMIN_IDS", "101")
+    assert credentials.load() is True                # what the restore route calls
+    credentials.poke()
+    assert credentials._event().is_set()             # `run.bot_worker` can wake up
