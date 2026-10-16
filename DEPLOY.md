@@ -222,7 +222,7 @@ DB_FILE=preview.sqlite3 .venv/bin/python tools/seed_demo.py   # (ঐচ্ছি
 
 ```bash
 .venv/bin/python tools/static_check.py app web tools bot.py run.py   # undefined name = ক্র্যাশ
-.venv/bin/python -m pytest tests -q                                  # ৪৯৩টি টেস্ট
+.venv/bin/python -m pytest tests -q                                  # ৪৯৪টি টেস্ট
 ```
 
 `static_check.py` না মিললে ডিপ্লয় করবেন না — এটাই সেই ক্লাসের বাগ ধরে যা বট

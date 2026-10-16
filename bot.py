@@ -168,8 +168,8 @@ def main() -> int:
                         "app.handlers.admin",
                         "app.handlers.billing",
                         "app.handlers.extras", "app.handlers.inline", "app.handlers.linkpanel",
-                        "app.handlers.manage", "app.handlers.messages", "app.handlers.panel_v3",
-                        "app.handlers.bots", "app.handlers.user"):
+                        "app.handlers.bots", "app.handlers.manage", "app.handlers.messages",
+                        "app.handlers.panel_v3", "app.handlers.user"):
         import_module(module_name)
 
     import app.logger as logger_module

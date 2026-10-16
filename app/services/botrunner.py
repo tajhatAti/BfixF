@@ -253,7 +253,8 @@ def autostart() -> dict:
 
 
 def add(token: str, *, label: str = "", admin_id: int = 0, api_id: int = 0,
-        api_hash: str = "", note: str = "", enabled: int = 1) -> dict:
+        api_hash: str = "", note: str = "", enabled: int = 1,
+        origin: str = "panel") -> dict:
     """Validate and store a new bot (the panel and the BotFather forward both use it)."""
     token = (token or "").strip()
     if not TOKEN_RE.fullmatch(token):
@@ -267,7 +268,7 @@ def add(token: str, *, label: str = "", admin_id: int = 0, api_id: int = 0,
     bot_id = db.bots_store.add_bot(token, label=label or f"বট {int(time.time()) % 1000}",
                         admin_id=admin_id or (credentials.admins() or [0])[0],
                         api_id=api_id or cfg.API_ID, api_hash=api_hash or cfg.API_HASH,
-                        note=note, enabled=enabled)
+                        note=note, enabled=enabled, origin=origin)
     return {"ok": True, "id": bot_id}
 
 

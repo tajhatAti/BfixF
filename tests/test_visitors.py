@@ -240,3 +240,75 @@ def test_a_new_bot_uses_the_saved_api_id_and_hash(client, monkeypatch):
     row = db.bots_store.bots()[0]
     assert int(row["api_id"]) == cfg.API_ID and row["api_hash"] == cfg.API_HASH
     assert int(row["admin_id"]) == ADMIN_ID
+
+
+# ------------------------------------------------------------- the bot's side
+@pytest.mark.asyncio
+async def test_the_bot_lists_and_controls_the_extra_bots(tmp_path, monkeypatch):
+    """বটে /bots — তালিকা, চালু/বন্ধ, আর BotFather ফরওয়ার্ড থেকে অটো-অ্যাড।"""
+    import asyncio
+    from types import SimpleNamespace
+
+    from app import config as cfg
+    from app.handlers import bots as bots_handler
+    from app.handlers import state as flow_state
+
+    db.bind(str(tmp_path / "bots.sqlite3"))       # its own database, never the repo one
+    cfg.ADMIN_IDS[:] = [ADMIN_ID]
+    monkeypatch.setattr("app.services.botrunner.start", lambda row, wait=1.5: {"ok": True, "pid": 7})
+    monkeypatch.setattr("app.services.botrunner.stop", lambda row: {"ok": True})
+
+    class Ev:
+        def __init__(self, text=""):
+            self.sender_id, self.chat_id, self.is_private = ADMIN_ID, ADMIN_ID, True
+            self.raw_text = text
+            self.sent, self.answers = [], []
+
+        async def respond(self, text=None, buttons=None, **_kw):
+            self.sent.append(text)
+            return SimpleNamespace(edit=self._edit)
+
+        async def _edit(self, text=None, buttons=None, **_kw):
+            self.sent.append(text)
+
+        async def answer(self, text=None, alert=False):
+            self.answers.append((text, alert))
+
+        async def edit(self, text=None, buttons=None, **_kw):
+            self.sent.append(text)
+
+    db.bots_store.add_bot("6666666666:" + "F" * 35, label="ব্যাকআপ বট", admin_id=ADMIN_ID)
+    first_id = db.bots_store.bots()[0]["id"]
+    event = Ev("/bots")
+    await bots_handler.bots_command(event)
+    assert "ব্যাকআপ বট" in event.sent[-1] and "6666666666" in event.sent[-1]
+
+    # a forward from BotFather starts a new bot without any typing
+    class Msg:
+        raw_text = ("Done! Congratulations on your new bot. You will find it at "
+                    "t.me/backup_store_bot.\nUse this token to access the HTTP API:\n"
+                    "7777777777:" + "G" * 35)
+        from_id = type("Peer", (), {"user_id": bots_handler.botrunner.BOTFATHER_ID})()
+        sender_id = bots_handler.botrunner.BOTFATHER_ID
+
+    forward = Ev("")
+    forward.message = Msg()
+    await bots_handler.bots_botfather_forward(forward)
+    assert "চালু হয়ে গেছে" in forward.sent[-1], forward.sent[-1]
+    assert "@backup_store_bot" in forward.sent[-1]             # নামটাই BotFather থেকে
+    labels = [row["label"] for row in db.bots_store.bots()]
+    assert "ব্যাকআপ বট" in labels and len(db.bots_store.bots()) == 2
+
+    # the buttons stop / drop a bot
+    button = Ev("")
+    await bots_handler.bots_buttons(button, f"stop:{first_id}")
+    assert button.answers and "বন্ধ" in button.answers[-1][0]
+    await bots_handler.bots_buttons(button, f"drop:{first_id}")
+    assert all(int(row["id"]) != int(first_id) for row in db.bots_store.bots())
+
+    # a non-admin gets nothing
+    stranger = Ev("/bots")
+    stranger.sender_id = 123456789
+    flow_state.clear(123456789)
+    await bots_handler.bots_command(stranger)
+    assert not stranger.sent                                   # silently ignored

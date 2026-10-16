@@ -16,6 +16,7 @@ from __future__ import annotations
 from telethon import Button, events
 
 from app import config as cfg
+from app.handlers.router import route
 from app.handlers.state import peek, take
 from app.logger import log
 from app.runtime import bot
@@ -72,6 +73,8 @@ def _help() -> str:
                           .lower().startswith("/bots")))
 async def bots_command(event) -> None:
     """`/bots …` — add, list, start, stop, drop."""
+    if not _is_admin(event):
+        return
     parts = (event.raw_text or "").strip().split()
     action = (parts[1].lower() if len(parts) > 1 else "list")
     argument = parts[2] if len(parts) > 2 else ""
@@ -129,6 +132,8 @@ async def bots_command(event) -> None:
 @bot.on(events.NewMessage(func=lambda e: _is_admin(e) and peek(e.sender_id) is not None
                           and (peek(e.sender_id) or {}).get("action") == WAITING))
 async def bots_token_here(event) -> None:
+    if not _is_admin(event):
+        return
     token = botrunner.token_of(event) or (event.raw_text or "").strip()
     take(event.sender_id)
     await _add_token(event, token)
@@ -138,6 +143,8 @@ async def bots_token_here(event) -> None:
                           and botrunner.is_from_botfather(e.message)))
 async def bots_botfather_forward(event) -> None:
     """The owner forwards BotFather's “Use this token…” message → bot added."""
+    if not _is_admin(event):
+        return
     token = botrunner.token_of(event.message)
     if not token:
         return
@@ -166,14 +173,25 @@ async def bots_botfather_forward(event) -> None:
 
 
 def _guess_label(message) -> str:
-    """BotFather writes the bot's name on the line before the token."""
+    """A friendly name for the new bot out of BotFather's own message.
+
+    BotFather's text contains `t.me/<username>_bot`, which is exactly the name the
+    owner recognises, so that comes first; otherwise the first short line.
+    """
     text = (getattr(message, "raw_text", None) or getattr(message, "text", None) or "")
+    import re
+    found = re.search(r"t\.me/(@?[A-Za-z0-9_]{4,32})", text)
+    if found:
+        return "@" + found.group(1).lstrip("@")
     for line in text.splitlines():
         cleaned = line.strip()
-        if not cleaned or ":" in cleaned and line.strip().split(":")[0].isdigit():
+        if not cleaned:
             continue
         lowered = cleaned.lower()
-        if any(hint in lowered for hint in botrunner.TOKEN_HINTS) or "http api" in lowered:
+        if "http api" in lowered or botrunner.TOKEN_RE.search(cleaned):
+            continue
+        if any(hint in lowered for hint in ("congratulations", "you will find it",
+                                            "revoke the current token")):
             continue
         if 2 <= len(cleaned) <= 40:
             return cleaned[:40]
@@ -211,12 +229,17 @@ def buttons_for(rows: list[dict]) -> list[list]:
     return out
 
 
-@bot.on(events.CallbackQuery(pattern=rb"^bots:"))
-async def bots_buttons(event) -> None:
+@route("bots:")
+async def bots_buttons(event, rest: str) -> None:
+    """▶️ চালু · ⏹ বন্ধ · 🗑 বাদ — the buttons under the bot list."""
     if event.sender_id not in set(credentials.admins()):
         await event.answer("শুধু অ্যাডমিন পারবেন", alert=True)
         return
-    _, action, raw_id = event.data.decode().split(":", 2)
+    parts = (rest or "").split(":")
+    if len(parts) < 2 or not parts[1].isdigit():
+        await event.answer("বাটনটা চেনা যায়নি", alert=True)
+        return
+    action, raw_id = parts[0], parts[1]
     row = db.bots_store.bot(int(raw_id))
     if row is None:
         await event.answer("বটটা নেই", alert=True)
