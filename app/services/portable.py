@@ -399,6 +399,31 @@ KIND_LEGACY_JSON = "legacy-json"    # the old bot_db.json
 KIND_EXPORT_JSON = "export-json"    # our own /admin/download/json
 KIND_UNKNOWN = "unknown"
 
+# `imported` dict-এর কীগুলো মানুষের পড়ার মতো বাংলায় দেখানোর জন্য
+IMPORT_LABELS = {
+    "users": "ইউজার", "stores": "স্টোর", "files": "ফাইল", "grants": "গ্রান্ট",
+    "orders": "অর্ডার", "coupons": "কুপন", "plans": "প্ল্যান", "campaigns": "ক্যাম্পেইন",
+    "events": "ইভেন্ট", "subscriptions": "সাবস্ক্রিপশন", "tickets": "টিকেট",
+    "added": "নতুন", "updated": "হালনাগাদ", "blocked": "ব্যান", "skipped": "বাদ",
+}
+_BN_DIGITS = str.maketrans("0123456789", "০১২৩৪৫৬৭৮৯")
+
+
+def bn_number(value) -> str:
+    """`12` → `১২` — বাংলা লেখার ভিতরে ইংরেজি সংখ্যা ঢুকতে দেব না।"""
+    return str(value).translate(_BN_DIGITS)
+
+
+def import_summary(report: dict) -> list[str]:
+    """`{'added': 3, 'blocked': 1}` → `['নতুন ৩', 'ব্যান ১']`।"""
+    parts = []
+    for key, value in (report.get("imported") or {}).items():
+        if not value:
+            continue
+        label = IMPORT_LABELS.get(str(key), str(key))
+        parts.append(f"{label} {bn_number(value)}")
+    return parts
+
 
 def _sqlite_tables(raw: bytes) -> set[str]:
     conn = _connect_bytes(raw)

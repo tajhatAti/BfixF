@@ -3139,9 +3139,8 @@ def create_app() -> FastAPI:
                  "আলাদা করে কিছু দিতে হবে না।" if report.get("credentials_included") else
                  "ব্যাকআপে টোকেন ছিল না — <code>/setup</code>-এ একবার টোকেন/API আইডি দিন।")
         if report.get("merge"):
-            imported = report.get("imported") or {}
-            bits = "".join(f"<li>{esc(str(key))}: <b>+{value}</b></li>"
-                           for key, value in imported.items() if value)
+            bits = "".join(f"<li>{esc(part)}</li>"
+                           for part in portable_service.import_summary(report))
             return (f"<div class='note ok'><b>✅ {esc(report.get('kind_label') or 'পুরোনো ব্যাকআপ')} "
                     f"যোগ করা হয়েছে</b> ({esc(report.get('source') or '')})"
                     f"<ul>{bits or '<li>সবই আগে থেকে ছিল — নতুন কিছু যোগ হয়নি</li>'}</ul>"
@@ -3172,9 +3171,7 @@ def create_app() -> FastAPI:
                              detail=f"{info.get('kind')} {report.get('counts_after', {})}"[:250])
         after = report.get("counts_after") or {}
         if report.get("merge"):
-            imported = report.get("imported") or {}
-            bits = ", ".join(f"{key} +{value}" for key, value in imported.items()
-                             if isinstance(value, int) and value)
+            bits = ", ".join(portable_service.import_summary(report))
             return True, (f"✅ {info.get('label') or 'পুরোনো ব্যাকআপ'} যোগ করা হয়েছে"
                           + (f" ({bits})" if bits else "")
                           + f" — এখন মোট {after.get('users', 0)} ইউজার, "

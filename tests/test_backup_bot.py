@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import suppress
 from types import SimpleNamespace
 
@@ -245,7 +246,37 @@ async def test_the_bot_merges_an_older_bots_user_list(bot_ctx, tmp_path):
     await call(portable_handlers.restore_confirm, confirm, "go")
     text = " ".join(t or "" for t, _ in confirm.sent)
     assert "যোগ করা হয়েছে" in text and "অক্ষত" in text
-    assert "+2" in text                                     # কতজন যোগ হলো
+    assert "নতুন ২" in text and "ব্যান ১" in text            # কতজন, কীভাবে যোগ হলো
     assert db.user(4242) is not None and db.user(31337) is not None
     assert db.is_banned(4243) is True                       # ব্লকড ছিল → ব্যান
     assert not portable_handlers._pending
+
+
+@pytest.mark.asyncio
+async def test_a_json_that_is_not_a_backup_keeps_its_own_flow(bot_ctx):
+    """একটা সাধারণ json ফাইল ভুল করে রিস্টোর ফ্লোতে ঢুকে পড়বে না।"""
+    from app.handlers import state as flow_state
+    flow_state.ask(ADMIN_ID, "content_upload")          # some other flow is waiting
+    event = Ev("", document=SimpleNamespace(id=1),
+               client=BytesClient(b'{"hello": "world"}'))
+    event.message.file = SimpleNamespace(name="content.json", size=20)
+    await call(portable_handlers.restore_document, event)
+    assert not event.sent                               # কিছুই বলল না, দখলও করল না
+    assert flow_state.peek(ADMIN_ID, fresh=False) is not None
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_json_backup_works_from_the_chat_too(bot_ctx, tmp_path):
+    legacy = {"user_details": {"5050": {"name": "পুরোনো বটের ইউজার", "joined": 1.0}},
+              "stores": {}, "premium_access": {}}
+    event = Ev("", document=SimpleNamespace(id=1),
+               client=BytesClient(json.dumps(legacy, ensure_ascii=False).encode("utf-8")))
+    event.message.file = SimpleNamespace(name="bot_db.json", size=90)
+    await call(portable_handlers.restore_document, event)
+    summary, buttons = event.sent[-1]
+    assert "যোগ" in summary and buttons and len(buttons[0]) == 2
+    confirm = Ev("")
+    await call(portable_handlers.restore_confirm, confirm, "go")
+    text = " ".join(t or "" for t, _ in confirm.sent)
+    assert "যোগ করা হয়েছে" in text and db.user(5050) is not None
+    assert db.user(11) is not None                              # পুরোনো ইনস্টল অটুট

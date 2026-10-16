@@ -152,16 +152,22 @@ async def restore_document(event) -> None:
     question = peek(admin_id)
     name = (getattr(event.message.file, "name", "") or "").lower()
     wanted = bool(question and question.get("action") == "restore_file")
-    looks_like = name.endswith(portable.SUFFIX) or name.endswith(
+    named = name.endswith(portable.SUFFIX) or name.endswith(
         (".sqlite3", ".db", ".bfixf", ".gz"))
-    if not (wanted or looks_like):
+    maybe_json = name.endswith(".json")            # পুরোনো bot_db.json / আমাদের এক্সপোর্ট
+    if not (wanted or named or maybe_json):
         return                                    # normal uploads go to their own flow
-    take(admin_id)
     try:
         data = bytes(await _client(event).download_media(event.message, file=bytes))
     except Exception as exc:
         await event.respond(f"❌ ফাইলটা নামানো যাচ্ছে না: {esc(str(exc))}")
         raise events.StopPropagation
+    if maybe_json and not (wanted or named):
+        try:
+            portable.inspect(data)
+        except portable.BackupError:
+            return                                # সাধারণ json → নিজের ফ্লোতে যাক
+    take(admin_id)
     await _offer(event, admin_id, data, name or "ফাইল")
     raise events.StopPropagation
 
@@ -242,9 +248,7 @@ async def restore_confirm(event, rest: str) -> None:
     after = report.get("counts_after") or {}
     before = report.get("counts_before") or {}
     if report.get("merge"):
-        imported = report.get("imported") or {}
-        bits = "\n".join(f"• {esc(str(key))}: <b>+{value}</b>"
-                          for key, value in imported.items() if value)
+        bits = "\n".join(f"• {esc(part)}" for part in portable.import_summary(report))
         await event.respond(
             "✅ <b>যোগ করা হয়েছে</b> — বর্তমান ডেটা অক্ষত\n\n"
             + (bits or "• সবই আগে থেকে ছিল")
