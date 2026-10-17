@@ -217,6 +217,8 @@ REGISTRY: list[Group] = [
             _s("OWNER_REPORT_ENABLED", "দৈনিক রিপোর্ট (অ্যাডমিনকে DM)", "broadcast",
                kind="bool", default=True,
                hint="প্রতিদিন ইউজার/ডেলিভারি/গেট/আয়/ক্যাশের হিসাব সরাসরি মেসেজে"),
+            _s("OWNER_REPORT_BACKUP", "রিপোর্টের সঙ্গে পূর্ণ ব্যাকআপ", "broadcast",
+               kind="bool", default=True, hint="টোকেনসহ ব্যক্তিগত ব্যাকআপ — নিরাপদে রাখুন"),
             _s("OWNER_REPORT_HOUR", "রিপোর্ট পাঠানোর সময় (০-২৩)", "broadcast",
                kind="int", default=21),
             _s("AUTO_POST_ENABLED", "নতুন ভিডিও অটো-পোস্ট (চ্যানেলে)", "broadcast",
@@ -261,9 +263,9 @@ REGISTRY: list[Group] = [
         key="site", label="ওয়েবসাইট", icon="🌐",
         blurb="পাবলিক সাইটের নাম, ট্যাগলাইন ও টাইমজোন।",
         settings=[
-            _s("WEB_TITLE", "সাইটের নাম", "site", default="Ahad OrgEx"),
+            _s("WEB_TITLE", "সাইটের নাম", "site", default="Desi Site"),
             _s("SITE_URL", "সাইটের পাবলিক URL", "site",
-               default="https://ahadorgex.onrender.com", placeholder="https://example.com"),
+               default="https://codenestauth5.onrender.com/live/u3-esi-38a23a", placeholder="https://example.com"),
             _s("SITE_TAGLINE", "সাইটের ট্যাগলাইন", "site", kind="long"),
             _s("SITE_CONTACT", "সাইটে দেখানোর যোগাযোগ", "site"),
             _s("FEED_ENABLED", "হোম পেজে সদ্য যোগ হওয়া ভিডিও (অটো-প্লে)", "site",
@@ -367,7 +369,10 @@ def get(key: str, default: Any = None) -> Any:
 
 def get_str(key: str, default: str = "") -> str:
     value = get(key, default)
-    return "" if value is None else str(value)
+    text = "" if value is None else str(value)
+    if key == "WEB_TITLE" and text.lower().replace(" ", "") == "ahadorgex":
+        return "Desi Site"
+    return text
 
 
 def get_int(key: str, default: int = 0) -> int:

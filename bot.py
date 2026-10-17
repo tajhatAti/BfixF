@@ -49,7 +49,8 @@ async def on_startup(client: TelegramClient) -> None:
 
     await seed_and_reconnect_sessions()
     await prepare_media_cache()
-    scheduler.start_all()
+    if os.getenv("BOT_EXTRA") != "1":
+        scheduler.start_all()  # one owner of broadcasts/backups, never duplicate jobs
 
 
 async def prepare_media_cache() -> None:
@@ -108,14 +109,14 @@ async def admin_error_notifier(text: str) -> None:
 def main() -> int:
     setup_logging()
 
-    if os.getenv("BOT_EXTRA") == "1" and not os.getenv("PORT"):
+    if os.getenv("BOT_EXTRA") == "1":
         # Started by `app/services/botrunner.py` as an *extra* bot: this process
         # only polls its own token. The website already runs in the main process,
         # so it must not try to bind the port again.
         globals()["start_website"] = lambda: None
         log.info("Extra bot mode (%s): serving Telegram only", os.getenv("BOT_LABEL") or "bot")
 
-    if cfg.HOSTED:
+    if cfg.HOSTED and os.getenv("BOT_EXTRA") != "1":
         # A hosting panel (CodeNest/RunSpace, Render, Railway…) sets $PORT and
         # waits for us to listen on it. `run.py` is exactly that product — the
         # website plus a bot that reconnects instead of dying — so reuse it

@@ -312,3 +312,102 @@ async def test_the_bot_lists_and_controls_the_extra_bots(tmp_path, monkeypatch):
     flow_state.clear(123456789)
     await bots_handler.bots_command(stranger)
     assert not stranger.sent                                   # silently ignored
+
+
+def test_lazy_video_paths_resolve_under_live_proxy(client):
+    from app.services import basepath
+    from urllib.parse import urljoin
+    html = '<video src="/media/4" data-src="/media/5" data-stream="/media/5" poster="/media/5/thumb">'
+    fixed = basepath.relativize(html)
+    assert '="/media/' not in fixed
+    assert 'data-src="media/5"' in fixed
+    assert 'data-stream="media/5"' in fixed
+    assert urljoin('https://host/live/job/', 'media/5') == 'https://host/live/job/media/5'
+    assert basepath.relativize('<video data-src="https://cdn/v" data-stream="//cdn/v">') == '<video data-src="https://cdn/v" data-stream="//cdn/v">'
+
+
+def test_old_saved_brand_is_replaced_without_changing_content(client):
+    from app.services import settings
+    settings.set('WEB_TITLE', 'Ahad OrgEx')
+    response = client.get('/')
+    assert 'Desi Site' in response.text
+    assert 'Ahad OrgEx' not in response.text
+
+
+def test_backup_bots_are_available_on_public_site(client):
+    row = botrunner.add('987654321:' + 'B' * 35)
+    db.bots_store.update_bot(row['id'], username='backup_desi_bot')
+    assert 'https://t.me/backup_desi_bot' in client.get('/').text
+    db.bots_store.update_bot(row['id'], enabled=0)
+    assert 'https://t.me/backup_desi_bot' not in client.get('/').text
+
+
+def test_recovery_backoff_and_disabled_bots(client, monkeypatch):
+    row = botrunner.add('987654321:' + 'B' * 35)
+    botrunner._recovery.clear()
+    calls = []
+    monkeypatch.setattr(botrunner, 'is_running', lambda row: False)
+    def failed(row, **kw):
+        calls.append(row['id'])
+        return {'ok': False}
+    monkeypatch.setattr(botrunner, 'start', failed)
+    assert botrunner.recover_once(100)['failed'] == [row['id']]
+    botrunner.recover_once(120)
+    assert len(calls) == 1
+    botrunner.recover_once(161)
+    assert len(calls) == 2
+    db.bots_store.update_bot(row['id'], enabled=0)
+    botrunner.recover_once(2000)
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_report_sends_backup_once_per_admin_per_day(client, monkeypatch):
+    from app.services import portable, scheduler, settings
+    settings.set('OWNER_REPORT_BACKUP', True)
+    sent = []
+    async def report(*args, **kwargs):
+        return True
+    async def backup(admin_id, **kwargs):
+        sent.append(admin_id)
+        return {'sent': True}
+    monkeypatch.setattr(scheduler, 'safe_call', report)
+    monkeypatch.setattr(portable, 'send_backup', backup)
+    await scheduler.send_owner_report()
+    await scheduler.send_owner_report()
+    assert sent == [ADMIN_ID]
+
+
+@pytest.mark.asyncio
+async def test_failed_report_backup_can_retry(client, monkeypatch):
+    from app.services import portable, scheduler, settings
+    settings.set('OWNER_REPORT_BACKUP', True)
+    async def report(*args, **kwargs):
+        return True
+    async def failed(*args, **kwargs):
+        return {'sent': False}
+    monkeypatch.setattr(scheduler, 'safe_call', report)
+    monkeypatch.setattr(portable, 'send_backup', failed)
+    with pytest.raises(RuntimeError, match='pending'):
+        await scheduler.send_owner_report()
+    assert not db.get_meta(f'report_backup:{ADMIN_ID}')
+
+
+def test_extra_bot_never_starts_hosted_web_runner(client, monkeypatch):
+    import bot as entry
+    import run
+    monkeypatch.setenv('BOT_EXTRA', '1')
+    monkeypatch.setenv('PORT', '9999')
+    monkeypatch.setattr(cfg, 'HOSTED', True)
+    monkeypatch.setattr(cfg, 'WEB_ENABLED', True)
+    monkeypatch.setattr(cfg, 'validate', lambda: ['test: no real Telegram connection'])
+    monkeypatch.setattr(entry, 'start_website', lambda: pytest.fail('extra bot bound website'))
+    monkeypatch.setattr(run, 'main', lambda: pytest.fail('extra bot entered main runner'))
+    assert entry.main() == 2
+
+
+def test_manual_stop_disables_automatic_recovery(client, monkeypatch):
+    row = botrunner.add('987654321:' + 'B' * 35)
+    monkeypatch.setattr(botrunner, 'read_pid', lambda _: 0)
+    assert botrunner.stop(db.bots_store.bot(row['id']))['ok']
+    assert not db.bots_store.bot(row['id'])['enabled']

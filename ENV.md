@@ -127,8 +127,8 @@
 | `WEB_ENABLED` | `true` | সাইট চালু/বন্ধ; hosted `$PORT` থাকলে listener চালু থাকে |
 | `WEB_HOST` | `0.0.0.0` | কোন ঠিকানায় শুনবে (hosting-এ `0.0.0.0` দরকার) |
 | `WEB_PORT` | `8080` | local পোর্ট; hosted service-এর `PORT` অগ্রাধিকার পায় |
-| `WEB_TITLE` | `Ahad OrgEx` | সাইটের নাম |
-| `SITE_URL` | `https://ahadorgex.onrender.com` | public domain / canonical site URL |
+| `WEB_TITLE` | `Desi Site` | সাইটের নাম |
+| `SITE_URL` | `https://codenestauth5.onrender.com/live/u3-esi-38a23a` | public domain / canonical site URL |
 | `SITE_TAGLINE` | *(খালি)* | public landing page-এর পরিচিতি |
 | `SITE_CONTACT` | *(খালি)* | public support contact |
 

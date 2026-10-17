@@ -118,6 +118,7 @@ def start(bot_row: dict, *, wait: float = 1.5) -> dict:
     if not bot_id:
         return {"ok": False, "error": "বট আইডি নেই"}
     if is_running(bot_row):
+        db.bots_store.update_bot(bot_id, enabled=1)
         return {"ok": True, "already": True, "pid": read_pid(bot_id)}
     token = (bot_row.get("token") or "").strip()
     if not TOKEN_RE.fullmatch(token or ""):
@@ -141,9 +142,13 @@ def start(bot_row: dict, *, wait: float = 1.5) -> dict:
             cwd=str(cfg.BASE_DIR), env=env, stdout=handle, stderr=handle,
             start_new_session=True)
     except Exception as exc:
+        handle.close()
         log.error("extra bot %s could not start: %s", bot_id, exc)
         db.bots_store.update_bot(bot_id, last_error=str(exc)[:200])
         return {"ok": False, "error": str(exc)}
+    handle.close()
+    _children[process.pid] = process
+    db.bots_store.update_bot(bot_id, enabled=1)
     pid_file(bot_id).write_text(str(process.pid))
     if wait:
         time.sleep(min(3.0, wait))
@@ -173,6 +178,7 @@ def db_bot_admins(bot_row: dict) -> list[int]:
 def stop(bot_row: dict) -> dict:
     """Stop an extra bot (SIGTERM, then SIGKILL if it does not leave)."""
     bot_id = int(bot_row.get("id") or 0)
+    db.bots_store.update_bot(bot_id, enabled=0)
     pid = read_pid(bot_id)
     if not pid or not _alive(pid):
         pid_file(bot_id).unlink(missing_ok=True)
@@ -275,3 +281,47 @@ def add(token: str, *, label: str = "", admin_id: int = 0, api_id: int = 0,
 def learn_username(bot_row: dict, username: str) -> None:
     if username:
         db.bots_store.update_bot(int(bot_row.get("id") or 0), username=username)
+
+# Only run this supervisor in run.py, not in the child bots. Retry state is
+# namespaced by database so restores/tests do not inherit another install's state.
+_recovery: dict[tuple[str, int], tuple[int, float]] = {}
+_children: dict[int, subprocess.Popen] = {}
+
+
+def recover_once(now: float | None = None) -> dict:
+    """Recover enabled crashed bots, with 60s–15min exponential backoff."""
+    now = time.time() if now is None else now
+    for pid, process in list(_children.items()):
+        if process.poll() is not None:
+            _children.pop(pid, None)  # reap zombies before checking pid files
+    recovered, failed = [], []
+    for row in db.bots_store.bots():
+        key = (str(db.path), int(row['id']))
+        if not row.get('enabled') or (row.get('token') or '') == cfg.BOT_TOKEN:
+            _recovery.pop(key, None)
+            continue
+        if is_running(row):
+            if now - float(row.get('last_start') or 0) > 300:
+                _recovery.pop(key, None)
+            continue
+        attempts, next_at = _recovery.get(key, (0, 0))
+        if now < next_at:
+            continue
+        result = start(row, wait=0.2)
+        delay = min(900, 60 * 2 ** min(attempts, 4))
+        _recovery[key] = (attempts + 1, now + delay)
+        (recovered if result.get('ok') else failed).append(row['id'])
+    return {'recovered': recovered, 'failed': failed}
+
+
+async def supervise() -> None:
+    """Independent of main bot connectivity; never launch a stopped bot."""
+    import asyncio
+    while True:
+        try:
+            report = recover_once()
+            if report['recovered'] or report['failed']:
+                log.warning('Bot recovery: %s', report)
+        except Exception:
+            log.exception('Bot recovery check failed')
+        await asyncio.sleep(30)

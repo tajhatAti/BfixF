@@ -172,8 +172,8 @@ WEB_HOST = get_str("WEB_HOST", get_str("HOST", "0.0.0.0"))
 # Hosting panels (CodeNest, Render, Railway, …) inject $PORT and route to it.
 WEB_PORT = get_int("PORT", get_int("WEB_PORT", 8080))
 WEB_SESSION_HOURS = get_int("WEB_SESSION_HOURS", 72)
-WEB_TITLE = get_str("WEB_TITLE", "Ahad OrgEx")
-SITE_URL = get_str("SITE_URL", "https://ahadorgex.onrender.com")
+WEB_TITLE = get_str("WEB_TITLE", "Desi Site")
+SITE_URL = get_str("SITE_URL", "https://codenestauth5.onrender.com/live/u3-esi-38a23a")
 #: True when a hosting panel gave us a port to listen on (CodeNest/RunSpace,
 #: Render, Railway…). The website must then start even if WEB_ENABLED was
 #: switched off, otherwise the panel shows “no web listener”.

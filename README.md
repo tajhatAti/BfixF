@@ -1,3 +1,15 @@
+## Desi Site — playback ও recovery আপডেট
+
+- CodeNest `/live/<job>/` proxy-তে `data-src`/`data-stream`-ও base-relative: lazy ভিডিও, retry ও watch একই prefix রাখে।
+- পুরোনো `Ahad OrgEx` ব্র্যান্ডের সেভ করা মানও এখন `Desi Site` দেখায়; স্টোর/ফাইলের নাম বা প্রকাশিত লিংক পরিবর্তন হয় না।
+- অ্যাডমিন: কালো surface, হলুদ action/navigation, mobile layout অপরিবর্তিত।
+- `OWNER_REPORT_BACKUP=true` (ডিফল্ট): দৈনিক রিপোর্টের সঙ্গে প্রত্যেক অ্যাডমিনকে পূর্ণ `.bfixf.gz` restore ফাইল। সফল delivery-র পরেই দিনের marker; ব্যর্থ হলে retry। ফাইলে credentials থাকে, প্রকাশ করবেন না।
+- `python run.py`: প্রতি ৩০ সেকেন্ডে বাড়তি বটের process recovery; ব্যর্থ হলে ৬০ সেকেন্ড থেকে সর্বোচ্চ ১৫ মিনিট backoff। Stop দিলে disabled থাকে; Start-এ আবার চালু।
+- Render-এর `PORT` child-এ থাকলেও extra bot ওয়েব সার্ভার/মূল টোকেন runner শুরু করে না। Child-এ scheduled broadcast/report/backup দ্বিতীয়বার চলে না।
+- enabled বাড়তি বটের username জানা থাকলে public footer-এ বিকল্প বটের লিংক। ভিন্ন বটকে ব্যবহারকারী আগে `/start` করতে হবে; এক বটের Telegram পরিচয়/চ্যাট অন্য বট দখল করতে পারে না।
+- এটি **একই হোস্টে process recovery**, আলাদা hosting failover নয়। পুরো হোস্ট বন্ধ হলে অন্য হোস্টে backup restore ও আলাদা deployment দরকার। বাস্তব ২–৩টি বট চালাতে BotFather-এর ২–৩টি ভিন্ন টোকেন যোগ করতে হবে।
+- যাচাই: **৫০৩ টেস্ট পাস** + static check। Live hosting-এ code redeploy করতে হবে; Git push নিজে deployment-এর নিশ্চয়তা নয়।
+
 # 🎬 Telegram Store Bot + 🌐 Website (v3)
 
 > 🚨 জরুরি সমস্যায় কী করবেন: [EMERGENCY.md](EMERGENCY.md) · ওয়েবসাইটে `/admin/emergency` · বটে `/emergency`

@@ -975,12 +975,14 @@ def test_the_quick_actions_are_on_the_overview(client):
         assert label in page, label
 
 
-def test_the_panel_theme_is_monochrome(client):
-    """Nothing in the workspace theme paints with a colour: black, white, grey."""
+def test_the_panel_theme_is_black_and_yellow(client):
+    """Owner-requested dark surfaces and high contrast yellow actions."""
     from web import adminui
     css = adminui.THEME_CSS
-    assert "--accent:#111111" in css
-    assert "--rail:#0b0b0b" in css               # the black rail
+    assert "--accent:#facc15" in css
+    assert "color-scheme: dark" in css
+    assert "--bg:#0c0c0c" in css
+    assert "--rail:#080808" in css               # the black rail
     assert "linear-gradient(" not in css and "radial-gradient(" not in css
     # The only colours allowed are the two status colours (a real red for danger,
     # a green for “done”) — the whole layout itself stays black and white.

@@ -1024,7 +1024,7 @@ def store_cover_url(store: dict) -> str:
 
 def layout(title: str, body: str, active: str = "",
            canonical_path: str | None = None) -> str:
-    brand = html.escape(settings.get_str("WEB_TITLE", "Ahad OrgEx") or "Ahad OrgEx")
+    brand = html.escape(settings.get_str("WEB_TITLE", "Desi Site") or "Desi Site")
     site_url = (settings.get_str("SITE_URL", cfg.SITE_URL) or cfg.SITE_URL).rstrip("/")
     base = basepath.current() or ""
     private_page = active.startswith("/admin") or title in {"Sign in", "Not found"}
@@ -1109,13 +1109,19 @@ def layout(title: str, body: str, active: str = "",
                ("/help", "❓ সাহায্য"))
         nav = "".join(f'<a class="{"on" if href == active else ""}" href="{href}">{label}</a>'
                       for href, label in pub)
+        backups = []
+        for extra in db.bots_store.bots():
+            username = (extra.get("username") or "").lstrip("@")
+            if extra.get("enabled") and re.fullmatch(r"[A-Za-z0-9_]{4,32}", username):
+                backups.append(f'<a href="https://t.me/{username}">🤖 বিকল্প বট @{username}</a>')
+        backup_links = " · ".join(backups)
         page = f"""{head}<body>
 <header>
   <h1><span class="logo">◈</span>{brand}</h1>
   <nav class="top">{nav}</nav>
 </header>
 <main>{body}</main>
-<footer>Telegram store bot · ফাইল বট নিজেই পাঠায়</footer>
+<footer>{brand} · ফাইল বট নিজেই পাঠায়<br>{backup_links}</footer>
 </body></html>"""
     page = basepath.relativize(page)
     return page.replace("__BASEPATH__", base)
@@ -1408,7 +1414,7 @@ def create_app() -> FastAPI:
         body = f"""
         <div class="landing{' has-feed' if feed_html else ''}">
         <div class="hero">
-          <p class="eyebrow">AHAD ORGEX · OFFICIAL PORTFOLIO</p>
+          <p class="eyebrow">DESI SITE · OFFICIAL</p>
           <h2>ভিডিও ও learning content—<span>একটি পরিষ্কার জায়গায়।</span></h2>
           <p>{esc(settings.get_str("SITE_TAGLINE")) or "আপনার পছন্দের store বেছে নিন। Telegram bot ভিডিওটি সরাসরি পাঠাবে—সহজ, দ্রুত, নিরাপদ।"}</p>
           <div class="row">

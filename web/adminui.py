@@ -1,6 +1,6 @@
 """Admin design system — one file, one look, reusable classes.
 
-The owner asked for a black-and-white, genuinely *designed* admin panel. Instead of
+The owner asked for a black-and-yellow, genuinely *designed* admin panel. Instead of
 patching colours here and there, everything the admin screens need lives in this
 module:
 
@@ -27,17 +27,17 @@ DEFAULT_BRAND = "Store Bot"
 
 THEME_CSS = """
 /* ============================================================================
-   BfixF admin — “print works” monochrome system.
-   One black, one white, three greys, one red for real danger. No gradients, no
+   Desi Site admin — black and yellow workspace.
+   Black surfaces, yellow actions, status colours for real feedback. No gradients, no
    blue, no shadows except a hairline. Everything is a rule or a square.
    ========================================================================== */
 :root {
-  color-scheme: light;
-  --bg:#f1f1ef; --surface:#ffffff; --surface-2:#fafaf8; --surface-3:#f4f4f1;
-  --rail:#0b0b0b; --rail-ink:#e8e8e4; --rail-muted:#8b8b86;
-  --ink:#0e0e0e; --ink-soft:#3c3c39; --muted:#71716c; --faint:#9a9a94;
-  --line:#e3e3de; --line-2:#cfcfc8; --line-3:#111111;
-  --accent:#111111; --accent-ink:#ffffff;
+  color-scheme: dark;
+  --bg:#0c0c0c; --surface:#171717; --surface-2:#1c1c1c; --surface-3:#242424;
+  --rail:#080808; --rail-ink:#ffe45c; --rail-muted:#b5ab78;
+  --ink:#faf5dc; --ink-soft:#dfd7b8; --muted:#b6af96; --faint:#918a73;
+  --line:#333025; --line-2:#49422c; --line-3:#facc15;
+  --accent:#facc15; --accent-ink:#111111;
   --ok:#0f6b3f; --ok-bg:#eef6f0; --warn:#8a5a00; --warn-bg:#faf5e9;
   --bad:#a92318; --bad-bg:#fbf0ee;
   --r:4px; --r-sm:3px; --r-pill:999px;
@@ -67,13 +67,13 @@ aside.side .brand { display:flex; align-items:center; gap:10px; padding:6px 8px 
 aside.side .brand small { display:block; font-weight:500; color:var(--rail-muted);
                           font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; }
 aside.side .brand .logo { flex:0 0 auto; width:30px; height:30px; display:grid; place-items:center;
-                          background:#fff; color:#0b0b0b; border-radius:var(--r); font-size:15px; }
+                          background:var(--accent); color:var(--accent-ink); border-radius:var(--r); font-size:15px; }
 aside.side a { display:flex; align-items:center; gap:10px; padding:8px 10px; margin:1px 0;
                color:#b6b6b0; border-radius:var(--r-sm); font-size:13.5px;
                text-decoration:none; border-left:2px solid transparent; }
 aside.side a .ic { width:16px; text-align:center; font-size:13px; opacity:.9; }
 aside.side a:hover { color:#fff; background:#1a1a1a; }
-aside.side a.on { color:#0b0b0b; background:#fff; font-weight:700; }
+aside.side a.on { color:var(--accent-ink); background:var(--accent); font-weight:700; }
 aside.side .grp { margin:16px 10px 5px; color:#6e6e69; font-size:9.5px; font-weight:800;
                   letter-spacing:.14em; text-transform:uppercase; }
 aside.side .rail-foot { margin-top:18px; padding:12px 10px 0; border-top:1px solid #1e1e1e;
@@ -90,7 +90,7 @@ details.navgrp > summary:hover { color:#fff; }
 
 .topbar { position:sticky; top:0; z-index:15; min-height:var(--top-w); display:flex; gap:12px;
           align-items:center; justify-content:space-between; padding:0 22px;
-          background:rgba(241,241,239,.92); backdrop-filter:blur(8px);
+          background:rgba(12,12,12,.94); backdrop-filter:blur(8px);
           border-bottom:1px solid var(--line-2); }
 .topbar .row { gap:10px; }
 .topbar .crumbs { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:12px; }
@@ -170,7 +170,7 @@ th { position:sticky; top:0; z-index:1; background:var(--surface-3); color:var(-
      font-size:10px; font-weight:800; letter-spacing:.1em; text-transform:uppercase;
      border-bottom:1px solid var(--line-2); }
 tbody tr:nth-child(even) td { background:var(--surface-2); }
-tbody tr:hover td { background:#f0f0ed; }
+tbody tr:hover td { background:#302a16; }
 tr:last-child td { border-bottom:0; }
 td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
 td .muted, .muted { color:var(--muted); font-size:12px; }

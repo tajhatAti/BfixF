@@ -164,8 +164,8 @@ async def owner_report_loop() -> None:
                 hour = int(local_time_str()[:2])
                 if hour >= settings.get_int("OWNER_REPORT_HOUR", 21) \
                         and db.get_meta("owner_report_day") != today:
-                    db.set_meta("owner_report_day", today)
                     await send_owner_report()
+                    db.set_meta("owner_report_day", today)
         except Exception as exc:
             log.error("owner report error: %s", exc)
         await asyncio.sleep(1800)
@@ -209,12 +209,25 @@ async def send_owner_report(days: int = 1) -> str:
         lines.append("")
         lines.append("💡 আজ কেউ কিছু খোলেনি — নতুন ব্রডকাস্ট বা ডাইজেস্ট দেওয়ার ভালো সময়।")
     text = "\n".join(lines)
+    failures = []
+    today = local_date_str()
     for admin_id in cfg.ADMIN_IDS:
         try:
             await safe_call(bot.send_message, admin_id, text, what="owner_report",
                             retries=1, link_preview=False)
-        except Exception:
-            continue
+            if settings.get_bool("OWNER_REPORT_BACKUP", True):
+                marker = f"report_backup:{admin_id}"
+                if db.get_meta(marker) != today:
+                    from app.services import portable
+                    result = await portable.send_backup(admin_id, note="daily-report")
+                    if not result.get("sent"):
+                        raise RuntimeError("daily backup delivery failed")
+                    db.set_meta(marker, today)
+        except Exception as exc:
+            failures.append(admin_id)
+            log.warning("Report/backup to %s failed: %s", admin_id, exc)
+    if failures:
+        raise RuntimeError(f"Report/backup pending for {len(failures)} admin(s)")
     db.set_meta("owner_report_text", text[:4000])
     return text
 

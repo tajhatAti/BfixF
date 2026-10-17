@@ -541,7 +541,7 @@ def placeholder_svg(name: str = "", kind: str = "video", accent: str = "#c9a45c"
         f"<text x='360' y='790' font-family='sans-serif' font-size='44' fill='%23e8e3d6'"
         f" text-anchor='middle'>{label}</text>"
         "<text x='360' y='1210' font-family='sans-serif' font-size='30' fill='%23c9a45c'"
-        " text-anchor='middle' opacity='.75'>Ahad OrgEx</text></svg>")
+        " text-anchor='middle' opacity='.75'>Desi Site</text></svg>")
 
 
 def placeholder_data_url(name: str = "", kind: str = "video") -> str:

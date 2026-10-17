@@ -128,7 +128,7 @@ CodeNest/RunSpace (আর আপনার নিজের হোস্ট সা
 | `API_ID`, `API_HASH` | my.telegram.org থেকে |
 | `BOT_TOKEN` | BotFather থেকে (নতুন রিভোক করা) |
 | `ADMIN_IDS` | আপনার টেলিগ্রাম numeric ID (একাধিক হলে কমা দিয়ে) |
-| `WEB_TITLE`, `SITE_URL` | ব্র্যান্ড ও public domain (`Ahad OrgEx`, `https://ahadorgex.onrender.com`) |
+| `WEB_TITLE`, `SITE_URL` | ব্র্যান্ড ও public domain (`Desi Site`, `https://codenestauth5.onrender.com/live/u3-esi-38a23a`) |
 
 **আর কিছু লাগবে না।** চ্যানেল জয়েন (প্রাইভেট লিংক সহ), পেমেন্ট নাম্বার, সাপোর্ট
 কন্টাক্ট, ক্যাপশন, ব্রডকাস্ট গতি, সাইটের নাম — সব **ওয়েবসাইটের `/admin/settings`**

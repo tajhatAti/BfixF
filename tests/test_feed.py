@@ -263,3 +263,18 @@ def test_the_wall_prefers_clips_that_can_play_right_now(tmp_path, monkeypatch):
     assert feed.playable_rank({"chat_id": -100, "msg_id": 5}) == 1
     # a demo row whose clip is missing is not “playable” either
     assert feed.playable_rank({"chat_id": 0, "msg_id": 999}) == 1
+
+
+def test_all_player_urls_keep_the_live_proxy_prefix(site):
+    import re
+    from urllib.parse import urljoin
+    for name in ('Clip One', 'Clip Two', 'Clip Three', 'Clip Four'):
+        _video(name, premium=False)
+    for path in ('/', '/watch'):
+        page = site.get(path, headers={'X-Forwarded-Prefix': '/live/u3-esi-38a23a'}).text
+        assert '<base href="/live/u3-esi-38a23a/">' in page
+        streams = re.findall(r'(?:data-stream|data-src)="([^"]+)"', page)
+        assert streams
+        for stream in streams:
+            assert not stream.startswith('/media/')
+            assert '/live/u3-esi-38a23a/' in urljoin('https://host/live/u3-esi-38a23a/', stream)

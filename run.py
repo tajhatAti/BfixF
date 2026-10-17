@@ -149,6 +149,7 @@ async def run() -> int:
     try:
         from app.services import botrunner
         autostart = botrunner.autostart()
+        tasks.append(asyncio.create_task(botrunner.supervise()))
         if autostart.get("started") or autostart.get("failed"):
             log.info("extra bots: %s", autostart)
     except Exception as exc:
