@@ -1,5 +1,37 @@
 # 🚀 ডিপ্লয় গাইড — বট + ওয়েবসাইট একসাথে (CodeNest / Render / VPS)
 
+## 🧭 কমান্ডে উত্তর নেই? আগে চলমান build ও পরিচয় যাচাই
+
+এই সংস্করণের পরিচয়: `desi-2026.10.18-command-recovery / <কোডের hash>`।
+Telegram বট মূল নিয়ন্ত্রণ, ওয়েবসাইট পাশাপাশি চলবে। পুরোনো DB/backup, প্রকাশিত
+ফাইল/লিংক ও ID বদলানোর প্রয়োজন নেই। শুধু নতুন কোড দিয়ে পুরোনো ডেটা রেখে restart করুন।
+
+1. হোস্টে `arena/182861c6-bfixf` শাখার সর্বশেষ কোড আছে কি না দেখুন। PR #1 এখনও
+   merge করা হয়নি; `main` থেকে deploy করলে এই পরিবর্তন আসবে না। Start command:
+   `python main.py` (অথবা বিদ্যমান `python run.py`)।
+2. হোস্টের **বটটি** restart করুন—শুধু ওয়েব পেজ reload নয়। startup-এ মালিকের DM-এ
+   bot username, build ও handler count আসবে (মালিক আগে বটে `/start` না দিলে Telegram
+   সেই DM আটকে দিতে পারে)।
+3. সেই একই bot username-এর ব্যক্তিগত চ্যাটে `/whoami` দিন। এটি সবার নিজের ID,
+   কার্যকর admin permission ও চলমান build দেখাবে; কোনো token/session দেখাবে না।
+4. মালিক হিসেবে `/version`, `/help`, `/status`, `/downloads` দিন। `/help` অ্যাডমিনকে
+   সম্পূর্ণ কমান্ড তালিকা দেয়; অন্যদের সাধারণ সাহায্য। Telegram-এর সাধারণ command menu-তে
+   শুধু start/help; ব্যক্তিগত admin scope-এ admin command menu বসানো হয়। Telegram menu
+   সেট করতে না পারলেও লিখে `/help` দিলে তালিকা আসবে।
+5. `/whoami`-তে admin permission **নেই** দেখালে ID ও কার্যকর admin settings মিলিয়ে নিন।
+   পুরোনো DB-এর সংরক্ষিত admin IDs config-এর ID-র চেয়ে অগ্রাধিকার পেতে পারে।
+   পুরোনো DB মুছবেন না; অনুমোদিত website admin/setup থেকেই ID ঠিক করুন।
+6. প্রত্যাশিত build না এলে পুরোনো process/branch বা অন্য bot-এর কোড চলছে। `/whoami`-ও
+   উত্তর না দিলে hosting startup/reconnect logs দেখুন; এই নতুন command gate তখনও চলছে
+   কি না বোঝা যায়নি। শুধু code push বা লোকাল test-কে live Telegram সফলতার প্রমাণ ভাববেন না।
+
+মালিক হলেন কার্যকর `ADMIN_IDS` তালিকার **প্রথম ID**। Warning/error, handler crash ও
+background-task failure-এর গোপন তথ্য ছেঁটে ব্যক্তিগত alert যায়; রেকর্ড `/errors`-এ
+শুধু মালিক দেখতে পারেন। একই error-এর alert ৬০ সেকেন্ডে একবার; প্রতিটি occurrence
+DB-তে থাকে। সাধারণ ইউজার traceback/technical error নয়, সাধারণ ব্যর্থতার বার্তা পান।
+Telegram/নেটওয়ার্ক বন্ধ থাকলে DM পৌঁছানোর নিশ্চয়তা নেই; DB চালু থাকলে `/errors`-এ
+রেকর্ড থাকবে, আর startup-এর আগের ব্যর্থতার জন্য hosting logs দেখতে হবে।
+
 ## 🚚 হোস্টিং বদলানো (নতুন সার্ভার / নতুন প্ল্যাটফর্ম)
 
 সব ডেটা একটা ফাইলেই থাকে, তাই সার্ভার বদলানো মানে এখন আর হাতে-কলমে কিছু গোছানো নয়:

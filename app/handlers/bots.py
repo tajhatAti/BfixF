@@ -132,6 +132,9 @@ async def bots_command(event) -> None:
 @bot.on(events.NewMessage(func=lambda e: _is_admin(e) and peek(e.sender_id) is not None
                           and (peek(e.sender_id) or {}).get("action") == WAITING))
 async def bots_token_here(event) -> None:
+    if (event.raw_text or '').strip().startswith('/'):
+        return  # slash commands always escape a pending media/token prompt
+
     if not _is_admin(event):
         return
     token = botrunner.token_of(event) or (event.raw_text or "").strip()

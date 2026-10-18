@@ -16,7 +16,9 @@ error_notifier = None
 
 
 def setup_logging(level: int = logging.INFO) -> logging.Logger:
-    if log.handlers:
+    from app.services.error_reports import install
+    install()
+    if any(isinstance(h, logging.StreamHandler) for h in log.handlers):
         return log
     log.setLevel(level)
     fmt = logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")

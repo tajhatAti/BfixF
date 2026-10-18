@@ -238,10 +238,9 @@ async def cancel_flow(event, rest: str) -> None:
 @bot.on(events.NewMessage(func=lambda e: e.is_private, pattern=r"^/help"))
 async def help_handler(event: events.NewMessage.Event) -> None:
     user_id = event.sender_id
-    text = texts.HELP_TEXT
-    if access.is_admin(user_id):
-        text += "\n\n" + texts.ADMIN_HELP
-    await event.respond(text)
+    from app.services.command_catalog import help_pages
+    for page in help_pages(access.is_admin(user_id)):
+        await event.respond(page)
 
 
 @bot.on(events.NewMessage(func=lambda e: e.is_private, pattern=r"^/cancel"))
@@ -254,9 +253,10 @@ async def cancel_handler(event: events.NewMessage.Event) -> None:
 # ------------------------------------------------------------------- callbacks
 @route("hp")
 async def help_button(event, _rest: str) -> None:
-    text = texts.HELP_TEXT
+    from app.services.command_catalog import help_pages
+    text = help_pages(access.is_admin(event.sender_id))[0]
     if access.is_admin(event.sender_id):
-        text += "\n\n" + texts.ADMIN_HELP
+        text += "\n/help — সম্পূর্ণ তালিকা"
     await ui.render(event, text, [[Button.inline("🔙 Back", "bs:0")]], edit=True)
     await event.answer()
 
@@ -458,9 +458,10 @@ async def reply_menu_buttons(event) -> None:
         await my_access(event, "0")
         return
     if label == texts.REPLY_HELP:
-        text = texts.HELP_TEXT
+        from app.services.command_catalog import help_pages
+        text = help_pages(access.is_admin(user_id))[0]
         if access.is_admin(user_id):
-            text += "\n\n" + texts.ADMIN_HELP
+            text += "\n/help — সম্পূর্ণ তালিকা"
         await event.respond(text,
                             buttons=[[Button.inline("🏠 স্টোর লিস্ট", "bs:0")]])
         return

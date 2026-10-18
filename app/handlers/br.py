@@ -668,6 +668,9 @@ def _inbox_buttons() -> list[list[Button]]:
 @bot.on(events.NewMessage(func=lambda e: _is_admin_private(e)
                           and (peek(e.sender_id) or {}).get("action") == "bc_media"))
 async def bm_capture(event) -> None:
+    if (event.raw_text or '').strip().startswith('/'):
+        return  # slash commands always escape a pending media/token prompt
+
     admin_id = event.sender_id
     item = quickcast.add_to_inbox(event.message)
     if item is None:

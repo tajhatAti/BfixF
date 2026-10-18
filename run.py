@@ -28,12 +28,7 @@ from app.logger import log, setup_logging
 from app.services import credentials, secrets_guard
 from app.storage import db
 
-HANDLER_MODULES = ("app.handlers.peers", "app.handlers.guard", "app.handlers.portable",
-                   "app.handlers.restricted", "app.handlers.bots", "app.handlers.br",
-                   "app.handlers.reel", "app.handlers.admin", "app.handlers.billing",
-                   "app.handlers.extras", "app.handlers.inline", "app.handlers.linkpanel",
-                   "app.handlers.manage", "app.handlers.messages", "app.handlers.panel_v3",
-                   "app.handlers.user")
+from app.handler_loader import HANDLER_MODULES, load_handlers
 
 
 async def secrets_watchdog() -> None:
@@ -56,7 +51,6 @@ async def bot_worker() -> None:
     token on the website's setup page, the page stores it in the database and
     `credentials.ready` wakes this worker. The website stays up the whole time.
     """
-    from importlib import import_module
 
     from telethon import errors
 
@@ -79,8 +73,7 @@ async def bot_worker() -> None:
 
     # Handlers register themselves on import — they must be imported *after* the
     # client exists, otherwise the buttons would answer to nobody.
-    for module_name in HANDLER_MODULES:
-        import_module(module_name)
+    load_handlers(client)
 
     import app.logger as logger_module
     logger_module.error_notifier = admin_error_notifier

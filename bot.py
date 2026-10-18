@@ -47,6 +47,8 @@ async def on_startup(client: TelegramClient) -> None:
     log.info("Database: %s users · %s files · %s stores · %s grants",
              stats["users"], stats["files"], stats["stores"], stats["grants"])
 
+    from app.services.command_catalog import announce_and_install
+    runtime.spawn(announce_and_install(client))
     await seed_and_reconnect_sessions()
     if os.getenv("BOT_EXTRA") != "1":
         scheduler.start_all()
@@ -102,9 +104,12 @@ async def admin_error_notifier(text: str) -> None:
     client = runtime.get_client()
     if client is None:
         return
-    for admin_id in cfg.ADMIN_IDS[:2]:
+    from app.services.error_reports import redact
+    from app.utils import esc
+    for admin_id in cfg.ADMIN_IDS[:1]:  # technical diagnostics belong to the owner
         try:
-            await client.send_message(admin_id, f"⚠️ <b>Bot error</b>\n<code>{text}</code>")
+            await asyncio.wait_for(client.send_message(
+                admin_id, f"⚠️ <b>বটের ত্রুটি — শুধু মালিকের জন্য</b>\n<pre>{esc(redact(text)[:3000])}</pre>"), timeout=10)
         except Exception:
             pass
 
@@ -167,14 +172,8 @@ def main() -> int:
 
     # Handlers register themselves on import (they need runtime.bot to exist),
     # so we import every handler module for its side effects.
-    from importlib import import_module
-    for module_name in ("app.handlers.restricted", "app.handlers.guard", "app.handlers.portable", "app.handlers.br",
-                        "app.handlers.admin",
-                        "app.handlers.billing",
-                        "app.handlers.extras", "app.handlers.inline", "app.handlers.linkpanel",
-                        "app.handlers.bots", "app.handlers.manage", "app.handlers.messages",
-                        "app.handlers.panel_v3", "app.handlers.user"):
-        import_module(module_name)
+    from app.handler_loader import load_handlers
+    load_handlers(client)
 
     import app.logger as logger_module
     logger_module.error_notifier = admin_error_notifier

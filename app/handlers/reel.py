@@ -155,6 +155,9 @@ def _list_buttons() -> list[list[Button]]:
                           and (peek(e.sender_id) or {}).get("action") == "reel_add"))
 async def reel_capture(event) -> None:
     """The media the admin sent right after `/reel add`."""
+    if (event.raw_text or '').strip().startswith('/'):
+        return  # slash commands always escape a pending media/token prompt
+
     admin_id = event.sender_id
     media = event.message.media
     if not isinstance(media, (MessageMediaPhoto, MessageMediaDocument)):

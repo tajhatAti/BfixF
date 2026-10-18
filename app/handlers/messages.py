@@ -926,9 +926,9 @@ async def pending_input(event) -> None:
         try:
             from app.handlers.manage import show_user_search_results
             await show_user_search_results(event, query)
-        except Exception as exc:
-            log.warning("user search failed: %s", exc)
-            await answer(f"❌ Search failed: {esc(str(exc)[:100])}")
+        except Exception:
+            log.exception("Search failed")
+            await answer("সার্চ করা যায়নি। পরে আবার চেষ্টা করুন।")
         return
 
     if action == "bulk_grant":

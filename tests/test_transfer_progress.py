@@ -239,14 +239,14 @@ async def test_scheduler_starts_without_waiting_for_cache_bootstrap(clean, monke
     async def prepare():
         pytest.fail('startup blocked waiting for channel bootstrap')
     def spawn(coro):
-        order.append('background-prepare')
+        order.append('background-menu' if coro.cr_code.co_name == 'announce_and_install' else 'background-prepare')
         coro.close()
     monkeypatch.setattr(bot, 'seed_and_reconnect_sessions', seed)
     monkeypatch.setattr(bot, 'prepare_media_cache', prepare)
     monkeypatch.setattr(bot.scheduler, 'start_all', lambda: order.append('scheduler'))
     monkeypatch.setattr(runtime, 'spawn', spawn)
     await bot.on_startup(Client())
-    assert order == ['sessions', 'scheduler', 'background-prepare']
+    assert order == ['background-menu', 'sessions', 'scheduler', 'background-prepare']
 
 
 def test_active_worker_keeps_heartbeat_when_kicked_again(clean, monkeypatch):

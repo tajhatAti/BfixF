@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import time
+import functools
 from collections import defaultdict, deque
 from typing import Any
 
-from telethon import TelegramClient
+from telethon import TelegramClient, events
 
 from app import config as cfg
 from app.logger import log
@@ -28,6 +29,38 @@ class _BotProxy:
     service were silently broken by that). The proxy resolves the real client on
     every call instead.
     """
+
+    def on(self, event=None, *, priority=10):
+        def decorate(func):
+            @functools.wraps(func)
+            async def guarded(update):
+                try:
+                    result = await func(update)
+                    if getattr(event, 'pattern', None) is not None or func.__name__ in ('bots_command', 'backup_command', 'restore_command'):
+                        setattr(update, '_bfix_command_handled', True)
+                    return result
+                except events.StopPropagation:
+                    raise
+                except Exception:
+                    log.exception('Telegram handler failed: %s.%s', func.__module__, func.__name__)
+                    try:
+                        if isinstance(update, events.CallbackQuery.Event):
+                            await update.answer('সমস্যা হয়েছে; অ্যাডমিনকে জানানো হয়েছে।', alert=True)
+                        elif getattr(update, 'is_private', False):
+                            await update.respond('সাময়িক সমস্যা হয়েছে। পরে আবার চেষ্টা করুন।')
+                    except Exception:
+                        pass
+                    raise events.StopPropagation
+            order = priority
+            if func.__module__ == 'app.handlers.peers':
+                order = -120
+            elif func.__module__ == 'app.handlers.guard':
+                order = -90
+            handler_registrations.append((order, guarded, event))
+            if _client is not None:
+                _attach(_client, guarded, event)
+            return func  # direct helpers remain testable; Telegram gets the guard
+        return decorate
 
     def __getattr__(self, item: str):
         return getattr(_require_client(), item)
@@ -48,10 +81,38 @@ def _require_client() -> TelegramClient:
 def set_client(client: TelegramClient | None) -> None:
     global _client
     _client = client
+    if client is not None:
+        install_handlers(client)
 
 
 def get_client() -> TelegramClient | None:
     return _client
+
+
+# Preserve decorators across cached imports/replaced clients. The old decorators
+# were attached only to whichever client existed at import time.
+handler_registrations: list = []
+
+
+def _attach(client, callback, event):
+    if not hasattr(client, 'on'):
+        return
+    attached = getattr(client, '_bfix_attached_handlers', None)
+    if not isinstance(attached, set):
+        attached = set()
+        setattr(client, '_bfix_attached_handlers', attached)
+    if callback not in attached:
+        client.on(event)(callback)
+        attached.add(callback)
+
+
+def install_handlers(client):
+    if hasattr(client, 'remove_event_handler'):
+        for _, callback, event in handler_registrations:
+            client.remove_event_handler(callback)
+        setattr(client, '_bfix_attached_handlers', set())
+    for _, callback, event in sorted(handler_registrations, key=lambda item: item[0]):
+        _attach(client, callback, event)
 
 
 bot = _BotProxy()
@@ -82,7 +143,14 @@ background_tasks: set[asyncio.Task] = set()
 def spawn(coro) -> asyncio.Task:
     task = asyncio.create_task(coro)
     background_tasks.add(task)
-    task.add_done_callback(background_tasks.discard)
+    def finished(done):
+        background_tasks.discard(done)
+        if not done.cancelled():
+            exc = done.exception()
+            if exc is not None:
+                log.error('Background task failed: %s', type(exc).__name__,
+                          exc_info=(type(exc), exc, exc.__traceback__))
+    task.add_done_callback(finished)
     return task
 
 
