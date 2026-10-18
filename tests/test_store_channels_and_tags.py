@@ -91,6 +91,7 @@ async def test_a_restarted_session_opens_the_cache_channel_from_the_database(tmp
             raise ValueError("no dialogs either")
 
     client = FreshSession()
+    monkeypatch.setattr(media_cache.runtime, "get_client", lambda: client)   # the bot
     resolved = await media_cache._resolve_peer(client, -1001900000001)
 
     assert isinstance(resolved, InputPeerChannel) and resolved.access_hash == 1234567890123
@@ -123,5 +124,5 @@ async def test_dialogs_teach_the_database_about_channels(tmp_path, monkeypatch):
             return [Dialog()]
 
     assert await media_cache._load_dialogs(Client(), force=True) is True
-    row = db.chat_peer(-1001900000005)
-    assert row and row["access_hash"] == 42 and row["title"] == "Cache channel"
+    # a userbot's hash is not the bot's hash — it must never reach the shared table
+    assert db.chat_peer(-1001900000005) is None

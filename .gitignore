@@ -44,3 +44,8 @@ Thumbs.db
 
 # demo env for the live preview (no real tokens)
 config.preview.env
+
+# Private PostgreSQL configuration and preconfigured deployment archives
+database.private.json
+private-deployment/
+*.private.zip

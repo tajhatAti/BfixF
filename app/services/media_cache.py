@@ -155,6 +155,29 @@ def _is_entity_error(exc: Exception) -> bool:
     return "input entity" in text or "peer id invalid" in text or "cannot find any entity" in text
 
 
+def _is_stale_channel_error(exc: Exception) -> bool:
+    """“Invalid channel object” — the saved access hash does not fit this account."""
+    text = str(exc).lower()
+    return ("invalid channel" in text or "channel invalid" in text or "channel_invalid" in text
+            or type(exc).__name__ == "ChannelInvalidError")
+
+
+def _forget_channels(file_row: dict | None, store: dict | None) -> None:
+    """Forget every saved channel hash this file's copy job depends on."""
+    ids = []
+    if file_row:
+        ids.append(file_row.get("chat_id"))
+    try:
+        ids.append(configured_storage())
+        if store and store.get("id"):
+            ids.append(_as_peer(db.get_meta(_store_meta_key(store["id"]), "")))
+    except Exception:
+        pass
+    for value in ids:
+        if isinstance(value, int) and value < 0:
+            peers.forget_chat(value)
+
+
 async def _load_dialogs(client, force: bool = False) -> bool:
     """A fresh StringSession knows no channels at all ("Could not find the input
     entity…"). Reading the dialog list teaches it every chat the account is in.
@@ -173,10 +196,16 @@ async def _load_dialogs(client, force: bool = False) -> bool:
     except Exception:
         pass
     try:
-        dialogs = await client.get_dialogs(limit=None)
+        dialogs = list(await client.get_dialogs(limit=None) or [])
     except Exception as exc:
         log.debug("could not load dialogs: %s", exc)
         return False
+    # The default walk skips the Archive folder, so a channel the owner archived
+    # was never learned. Read folder 1 too (best effort).
+    try:
+        dialogs += list(await client.get_dialogs(limit=None, folder=1) or [])
+    except Exception as exc:
+        log.debug("could not load archived dialogs: %s", exc)
     _dialogs_at[key] = time.time()
     learned = 0
     for dialog in dialogs or []:
@@ -188,29 +217,31 @@ async def _load_dialogs(client, force: bool = False) -> bool:
         except Exception:
             continue
         if peer_id < 0:
-            peers.remember_chat(peer_id, getattr(entity, "access_hash", None),
-                                getattr(entity, "title", None),
-                                getattr(entity, "username", None),
-                                "channel" if peers.is_channel_id(peer_id) else "chat")
-            learned += 1
-    log.info("userbot dialogs loaded (%s chats remembered)", learned)
+            learned += 1                       # the session itself now knows it
+    log.info("userbot dialogs loaded (%s chats known)", learned)
     return True
+
+
+def _is_bot(client) -> bool:
+    try:
+        return client is runtime.get_client()
+    except Exception:
+        return False
 
 
 async def _resolve_peer(client, peer):
     """Make sure `client` knows the channel (a fresh StringSession has no cache).
 
-    Three steps, cheapest first: our own SQLite-backed ``InputPeerChannel`` → the
-    session's own cache → a full dialog walk. Every success is remembered, so the
-    next restart needs none of it.
+    Telegram access hashes are **per account**: the hash the bot learned is not
+    valid for the owner's userbot ("Invalid channel object"). So the SQLite copy
+    (filled from the bot's own updates) is used for the bot only; the userbot always
+    asks its own session, then its own dialog list (archive folder included).
     """
-    cached = peers.chat_entity(peer) if (isinstance(peer, (int, str))
-        and str(peer).lstrip("-").isdigit() and int(peer) < 0) else None
+    numeric = (isinstance(peer, (int, str)) and str(peer).lstrip("-").isdigit()
+               and int(peer) < 0)
+    cached = peers.chat_entity(peer) if (numeric and _is_bot(client)) else None
     if cached is not None:
-        try:
-            return cached
-        except Exception:                      # pragma: no cover - defensive
-            pass
+        return cached
     try:
         entity = await client.get_input_entity(peer)
     except Exception:
@@ -220,13 +251,13 @@ async def _resolve_peer(client, peer):
         except Exception:
             await _note_channel_problem(peer)
             raise
-    _remember_entity(entity)
+    _remember_entity(entity, client)
     return entity
 
 
-def _remember_entity(entity) -> None:
-    """Store the (id, access_hash) of whatever Telegram just handed us."""
-    if entity is None:
+def _remember_entity(entity, client=None) -> None:
+    """Store the (id, access_hash) Telegram handed the *bot* (never a userbot's)."""
+    if entity is None or not _is_bot(client):
         return
     try:
         peer_id = int(utils.get_peer_id(entity))
@@ -266,11 +297,6 @@ async def _create_cache_channel(client, title: str, about: str, remember: bool =
             title=title[:120], about=about[:200], broadcast=True, megagroup=False))
         channel = result.chats[0]
         peer_id = utils.get_peer_id(channel)
-        if remember:
-            # A brand-new channel: cache the pair right away, so a restart (or a
-            # wiped session) can still open it without walking every dialog.
-            peers.remember_chat(peer_id, getattr(channel, "access_hash", None),
-                                getattr(channel, "title", None), None)
         if runtime.bot_username:
             await client.edit_admin(channel, runtime.bot_username, is_admin=True,
                                     post_messages=True, edit_messages=True,
@@ -450,8 +476,13 @@ async def _media_from(client, chat_id: int, msg_id: int):
         except FloodWaitError:
             raise
         except Exception as exc:
-            if attempt == 1 and _is_entity_error(exc) and await _load_dialogs(client, force=True):
-                continue                      # the cache was empty — retry once with it filled
+            if attempt == 1:
+                stale = _is_stale_channel_error(exc)
+                if stale:
+                    peers.forget_chat(chat_id)   # wrong hash: forget it, learn it again
+                if (stale or _is_entity_error(exc)) and (
+                        await _load_dialogs(client, force=True) or stale):
+                    continue                  # retry once with a refreshed cache
             _fetch_errors[(int(chat_id), int(msg_id))] = str(exc)[:160]
             log.debug("mirror fetch %s/%s failed: %s", chat_id, msg_id, exc)
             return None
@@ -561,7 +592,18 @@ async def ensure_mirror(file_row: dict, store: dict | None = None, force: bool =
                 not archive or is_archived(fresh, store)):
             return fresh
         try:
-            return await _ensure_mirror_locked(fresh, store, force, archive=archive)
+            try:
+                return await _ensure_mirror_locked(fresh, store, force, archive=archive)
+            except Exception as exc:
+                if not _is_stale_channel_error(exc):
+                    raise
+                # "Invalid channel object": drop the wrong saved hashes, let the
+                # session learn the channels again, and try exactly once more.
+                _forget_channels(fresh, store)
+                client = await live_session(fresh, store)
+                if client is not None:
+                    await _load_dialogs(client, force=True)
+                return await _ensure_mirror_locked(fresh, store, force, archive=archive)
         finally:
             if not lock.locked():
                 _file_locks.pop(int(file_row["id"]), None)
@@ -605,7 +647,8 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
     try:
         peer = await _resolve_peer(client, peer)
     except Exception as exc:
-        _note(file_row["id"], f"ইউজারবট ক্যাশ চ্যানেল খুলতে পারছে না ({str(exc)[:90]})")
+        from app.services.error_reports import friendly_error
+        _note(file_row["id"], f"ইউজারবট ক্যাশ চ্যানেল খুলতে পারছে না ({friendly_error(exc)[:120]})")
         # Self-healing: the configured channel is unreachable *and* this store may
         # have its own cache channel — try that before giving up on the file.
         if store is not None and settings.get_bool("PER_STORE_CHANNEL", True):
@@ -622,7 +665,7 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
     source = await _media_from(client, int(file_row["chat_id"]), int(file_row["msg_id"]))
     if source is None:
         why = _fetch_errors.get((int(file_row["chat_id"]), int(file_row["msg_id"])), "")
-        log.warning("Source read failed for file %s: %s", file_row["id"], why)
+        log.info("Source read failed for file %s: %s", file_row["id"], why)
         _note(file_row["id"], "এই সেশনের অ্যাকাউন্ট চ্যানেলটি পড়তে পারছে না। "
                               "চ্যানেলে জয়েন করুন বা সেশন থেকে সঠিক চ্যানেলটি আবার বাছুন।")
         return file_row
@@ -650,7 +693,6 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
                                      what="mirror_copy", retries=1)
         if copied is not None and getattr(copied, "media", None):
             _problems.pop(int(file_row["id"]), None)
-            peers.remember_from_message(copied)
             repository.set_mirror(file_row["id"], _mirror_chat_id(copied, peer), int(copied.id))
             log.info("mirrored file %s → %s/%s (copy)", file_row["id"],
                      _mirror_chat_id(copied, peer), copied.id)
@@ -719,7 +761,6 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
         )
         if sent is not None and getattr(sent, "media", None):
             _problems.pop(int(file_row["id"]), None)
-            peers.remember_from_message(sent)
             repository.set_mirror(file_row["id"], _mirror_chat_id(sent, peer), int(sent.id))
             repository.set_file_bytes(file_row["id"], os.path.getsize(tmp.name))
             log.info("mirrored file %s → %s/%s (re-upload, %.1f MB)", file_row["id"],

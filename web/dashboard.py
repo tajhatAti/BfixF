@@ -1230,10 +1230,12 @@ def setup_page() -> str:
     keep = ' placeholder="খালি রাখলে আগেরটাই থাকবে"' if configured else ""
     token_ph = html.escape(credentials.masked_token()) if configured else "1234567890:AAH…"
     back = ""
+    database_notice = '<div class="warnbox">ডেটাবেজে সংযোগ নেই। বট ও সাধারণ কাজ নিরাপদে বন্ধ আছে। নিচে connection file দিয়ে আবার যুক্ত করুন।</div>' if cfg.DATABASE_UNAVAILABLE else ''
     page = f"""<!doctype html><html lang="bn"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><base href="__BASEPATH__/">
 <title>সেটআপ · {brand}</title><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700;800&family=Hind+Siliguri:wght@400;500;600&display=swap"><style>{CSS}</style><style>{ui.THEME_CSS}</style></head><body>
 <div class="wiz">
+  {database_notice}
   <div class="head"><div class="logo">🤖</div>
     <h2>{"বট কানেকশন" if configured else "চলুন বটটা চালু করি"}</h2>
     <p>{"তথ্য বদলাতে চাইলে নতুন মান দিন — খালি ঘর আগের মতোই থাকবে।" if configured else "৩টা ছোট ধাপ — সব এখানেই, কোনো ফাইল বা ভেরিয়েবল ছুঁতে হবে না।"}</p>
@@ -1266,6 +1268,18 @@ def setup_page() -> str:
     <div class="row" style="justify-content:center;margin-top:14px">
       <a class="btn" href="/">🌐 সাইটে যান</a>
       <a class="btn grey" id="tg" style="display:none" target="_blank" rel="noopener">🤖 টেলিগ্রামে বট খুলুন</a></div></div>
+  </div>
+  <div class="card" id="database">
+    <h3>☁️ Supabase / PostgreSQL</h3>
+    <p>Environment variable লাগবে না। ব্যক্তিগত database configuration ফাইল দিন।
+       বর্তমান database URL বা password এই পেজে দেখানো হয় না।</p>
+    <form method="post" action="setup/database" enctype="multipart/form-data">
+      <input type="file" name="file" accept=".json,.zip,application/json,application/zip" required>
+      <label><input type="checkbox" name="confirm" value="yes" required> সংযোগ পরীক্ষা করে সেভ করুন</label>
+      <button class="btn" type="submit">☁️ ডেটাবেজ যুক্ত করুন</button>
+    </form>
+    <p class="help">নতুন/অফলাইন install হলে এখনই যুক্ত হবে। বট চালু থাকলে নিরাপদে
+       পরিবর্তনের জন্য restart করতে হবে। /var/data disk থাকলে connection file সেখানেই থাকে।</p>
   </div>
   <div class="card" id="restore">
     <div class="step"><div class="num">🔄</div><div class="box">
@@ -1392,6 +1406,56 @@ def create_app() -> FastAPI:
                 and not path.startswith(("/admin/login", "/admin/logout"))):
             return RedirectResponse("/setup", status_code=303)
         return await call_next(request)
+
+    @app.middleware('http')
+    async def database_recovery_gate(request: Request, call_next):
+        if cfg.DATABASE_UNAVAILABLE and request.url.path not in (
+                '/admin/login', '/admin/logout', '/setup', '/setup/database', '/health', '/favicon.ico'):
+            return Response('Database unavailable. Owner: open /setup to reconnect.', status_code=503,
+                            headers={'Retry-After': '10'})
+        return await call_next(request)
+
+    @app.post('/setup/database')
+    async def setup_database(request: Request, confirm: str = Form(''), file: UploadFile | None = File(None)):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        if confirm != 'yes' or file is None:
+            return JSONResponse({'ok': False, 'error': 'ফাইল ও confirmation দিন।'}, status_code=400)
+        from app import database_config
+        try:
+            config = database_config.parse(await file.read(16385))
+        except (ValueError, UnicodeError):
+            return JSONResponse({'ok': False, 'error': 'সঠিক database configuration JSON অথবা connection ZIP দিন।'}, status_code=400)
+        try:
+            await asyncio.to_thread(database_config.probe, config)
+        except Exception:
+            log.exception('PostgreSQL connection verification failed')
+            return JSONResponse({'ok': False, 'error': 'ডেটাবেজে সংযোগ হয়নি। URL, password ও provider network settings পরীক্ষা করুন।'}, status_code=502)
+        async with database_config.switch_lock():
+            # Never switch underneath live bot/session workers. In that case only save
+            # the configuration: next startup performs the atomic SQLite bootstrap.
+            if not cfg.DATABASE_UNAVAILABLE and (runtime.bot_online() or runtime.user_clients or credentials.is_configured()):
+                database_config.save(config, cfg.PRIVATE_DATABASE_FILE)
+                return HTMLResponse(layout('Database saved', '<div class="card"><h2>সংযোগ সেভ হয়েছে</h2><p>বট/সাইট restart করুন। Environment variable লাগবে না। পুরোনো ডেটা মুছবেন না।</p></div>', '/setup'))
+            old = (cfg.DATABASE_URL, cfg.DB_FILE, cfg.PG_SSLMODE, db._impl)
+            try:
+                cfg.DATABASE_URL = cfg.DB_FILE = config['database_url']
+                cfg.PG_SSLMODE = config['sslmode']
+                db.bind(cfg.DB_FILE)
+                database_config.save(config, cfg.PRIVATE_DATABASE_FILE)
+            except Exception:
+                failed = db._impl
+                cfg.DATABASE_URL, cfg.DB_FILE, cfg.PG_SSLMODE, db._impl = old
+                if failed is not old[3] and failed is not None:
+                    failed.conn.close()
+                log.exception('PostgreSQL setup/import failed; previous database retained')
+                return JSONResponse({'ok': False, 'error': 'ডেটাবেজ সেটআপ সম্পন্ন হয়নি। আগের ডেটা অক্ষত আছে।'}, status_code=502)
+            cfg.DATABASE_UNAVAILABLE = False
+            portable_service._clear_caches()
+            credentials.load()
+            credentials.poke()
+            return RedirectResponse(basepath.url('/setup'), status_code=303)
 
     @app.post("/setup/restore")
     async def setup_restore(request: Request, confirm: str = Form(""),
@@ -3438,7 +3502,7 @@ def create_app() -> FastAPI:
         body = f"""
         <h3>📥 এক্সপোর্ট</h3>
         <div class="card">
-          <p class="muted">DB: <code>{esc(cfg.DB_FILE)}</code> · {human_size(size)}</p>
+          <p class="muted">DB: <code>{esc(db.display_path)}</code> · {human_size(size)}</p>
           <p><a class="btn" href="/admin/download/db">🗄 SQLite</a>
              <a class="btn grey" href="/admin/download/json">📄 JSON</a></p>
           <p><a class="btn grey" href="/admin/download/csv/users">👥 Users CSV</a>
@@ -3669,6 +3733,10 @@ def create_app() -> FastAPI:
         blocked = _guard(request)
         if blocked:
             return blocked
+        if db.backend == 'postgresql':
+            snapshot = await asyncio.to_thread(db.conn.snapshot)
+            return Response(snapshot, media_type='application/octet-stream',
+                            headers={'Content-Disposition': 'attachment; filename="bot_data.sqlite3"'})
         if not os.path.exists(cfg.DB_FILE):
             return JSONResponse({"error": "DB file not found"}, status_code=404)
         return FileResponse(cfg.DB_FILE, filename="bot_data.sqlite3",

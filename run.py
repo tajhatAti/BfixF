@@ -126,14 +126,45 @@ async def web_worker() -> None:
     await server.serve()
 
 
+def initialize_database() -> bool:
+    try:
+        db.bind(cfg.DB_FILE)
+        cfg.DATABASE_UNAVAILABLE = False
+        return True
+    except Exception:
+        if not str(cfg.DB_FILE).startswith(('postgresql://', 'postgres://')):
+            raise
+        # Recovery UI only, never a second writable application database.
+        cfg.DATABASE_UNAVAILABLE = True
+        db.bind(':memory:')
+        log.exception('PostgreSQL unavailable; website is in database recovery mode')
+        return False
+
+
 async def run() -> int:
-    db.bind(cfg.DB_FILE)
+    tasks = []
+    if not initialize_database():
+        tasks.append(asyncio.create_task(web_worker()))
+        while cfg.DATABASE_UNAVAILABLE:
+            await asyncio.sleep(10)
+            if not cfg.DATABASE_UNAVAILABLE:
+                break
+            try:
+                from app import database_config
+                async with database_config.switch_lock():
+                    if cfg.DATABASE_UNAVAILABLE:
+                        await asyncio.to_thread(db.bind, cfg.DB_FILE)
+                        cfg.DATABASE_UNAVAILABLE = False
+            except Exception:
+                log.warning('PostgreSQL still unavailable; bot remains stopped')
     imported = db.migrate_legacy(cfg.LEGACY_DB_FILE)
     if imported:
         log.info("Imported the legacy bot_db.json: %s", imported)
 
     # The website is the only place the bot is configured, so it always runs.
-    tasks = [asyncio.create_task(web_worker()), asyncio.create_task(secrets_watchdog())]
+    if not tasks:
+        tasks.append(asyncio.create_task(web_worker()))
+    tasks.append(asyncio.create_task(secrets_watchdog()))
     credentials.load()
     tasks.append(asyncio.create_task(bot_worker()))
     # Several bots, one database: bring the extra ones up in their own processes

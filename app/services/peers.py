@@ -107,6 +107,24 @@ def remember_chat(peer_id: int, access_hash: int | None, title: str | None = Non
         log.debug("could not remember chat %s: %s", peer_id, exc)
 
 
+def forget_chat(peer_id: int) -> None:
+    """Drop a channel's saved hash (Telegram said it is wrong for this account).
+
+    Access hashes are per account: a hash saved from another session makes every
+    call fail with "Invalid channel object". Forgetting it lets the session learn
+    the channel again from its own dialogs.
+    """
+    try:
+        peer_id = int(peer_id)
+    except (TypeError, ValueError):
+        return
+    _chat_hashes.pop(peer_id, None)
+    try:
+        db._run("UPDATE chat_peers SET access_hash = NULL WHERE peer_id = ?", (peer_id,))
+    except Exception as exc:
+        log.debug("could not forget chat %s: %s", peer_id, exc)
+
+
 def known_chat_hash(peer_id: int) -> int | None:
     _check_binding()
     peer_id = int(peer_id)

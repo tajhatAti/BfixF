@@ -1418,3 +1418,67 @@ def test_setup_save_script_distinguishes_login_html_and_http_failure(client):
     assert 'async function setupJSON' in page
     assert 'response.redirected' in page and "response.status === 401" in page
     assert "await setupJSON(r)" in page
+
+
+def test_database_private_upload_is_authenticated_and_never_echoes_secret(client, monkeypatch, tmp_path):
+    import json
+    from app import database_config
+    target = tmp_path / 'database.private.json'
+    monkeypatch.setattr(cfg, 'PRIVATE_DATABASE_FILE', target)
+    monkeypatch.setattr(database_config, 'probe', lambda config: None)
+    config = {'database_url': 'postgresql://owner:PRIVATE_PASSWORD@db.example/postgres', 'sslmode': 'prefer'}
+    response = client.post('/setup/database', data={'confirm': 'yes'},
+                           files={'file': ('database.json', json.dumps(config))}, follow_redirects=False)
+    assert response.status_code == 303 and not target.exists()
+    response = client.post('/setup/database', headers=_auth(), data={'confirm': 'yes'},
+                           files={'file': ('database.json', json.dumps(config))})
+    assert response.status_code == 200 and target.exists()
+    assert 'PRIVATE_PASSWORD' not in response.text
+    assert 'Environment variable' in response.text
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_database_connection_failure_is_generic_and_does_not_save(client, monkeypatch, tmp_path):
+    import json
+    from app import database_config
+    target = tmp_path / 'database.private.json'
+    monkeypatch.setattr(cfg, 'PRIVATE_DATABASE_FILE', target)
+    def fail(config):
+        raise RuntimeError('postgresql://owner:PRIVATE_PASSWORD@db.example/postgres')
+    monkeypatch.setattr(database_config, 'probe', fail)
+    response = client.post('/setup/database', headers=_auth(), data={'confirm': 'yes'},
+                           files={'file': ('database.json', json.dumps({'database_url': 'postgresql://owner:PRIVATE_PASSWORD@db.example/postgres'}))})
+    assert response.status_code == 502 and not target.exists()
+    assert 'PRIVATE_PASSWORD' not in response.text
+
+
+def test_database_recovery_mode_blocks_application_writes_but_keeps_setup(client, monkeypatch):
+    monkeypatch.setattr(cfg, 'DATABASE_UNAVAILABLE', True)
+    assert client.get('/').status_code == 503
+    assert client.post('/setup/save', headers=_auth()).status_code == 503
+    assert client.get('/setup', headers=_auth()).status_code == 200
+    assert client.get('/admin/login').status_code == 200
+
+
+def test_postgres_raw_download_returns_portable_snapshot(client, monkeypatch):
+    monkeypatch.setattr(db._impl, 'backend', 'postgresql')
+    import sqlite3
+    snapshot = sqlite3.connect(':memory:')
+    snapshot.execute('create table demo (id integer)')
+    payload = snapshot.serialize()
+    snapshot.close()
+    original = db._impl.conn
+    class SnapshotConnection:
+        def snapshot(self):
+            return payload
+        def __getattr__(self, name):
+            return getattr(original, name)
+    monkeypatch.setattr(db._impl, 'conn', SnapshotConnection())
+    # Visitor middleware is best-effort; restore the fixture connection before teardown.
+    try:
+        response = client.get('/admin/download/db', headers=_auth())
+        assert response.status_code == 200
+        assert response.content == payload
+        assert 'bot_data.sqlite3' in response.headers['content-disposition']
+    finally:
+        db._impl.conn = original

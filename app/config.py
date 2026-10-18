@@ -10,6 +10,7 @@ Priority (highest first):
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -128,7 +129,25 @@ BROADCAST_BATCH = get_int("BROADCAST_BATCH", 25)
 BROADCAST_BATCH_PAUSE = get_float("BROADCAST_BATCH_PAUSE", 1.0)
 
 # ---------------------------------------------------------------------- paths
-DB_FILE = get_str("DB_FILE", str(BASE_DIR / "bot_data.sqlite3"))
+# Optional private file: credentials need not be environment variables or source code.
+_private_root = Path('/var/data') if Path('/var/data').is_dir() and os.access('/var/data', os.W_OK) else BASE_DIR
+PRIVATE_DATABASE_FILE = _private_root / 'database.private.json'
+_private_database = {}
+if PRIVATE_DATABASE_FILE.is_file():
+    try:
+        _private_database = json.loads(PRIVATE_DATABASE_FILE.read_text(encoding='utf-8'))
+        if not isinstance(_private_database, dict):
+            raise ValueError('object required')
+    except (ValueError, OSError) as exc:
+        raise RuntimeError('Private database configuration could not be read') from None
+DATABASE_UNAVAILABLE = False
+DATABASE_URL = str(_private_database.get('database_url') or get_str('DATABASE_URL', '')).strip()
+PG_SSLMODE = str(_private_database.get('sslmode') or get_str('PG_SSLMODE', 'require'))
+if DATABASE_URL and not DATABASE_URL.startswith(('postgresql://', 'postgres://')):
+    raise RuntimeError('Database URL must use postgresql:// or postgres://')
+_configured_db_file = get_str("DB_FILE", str(BASE_DIR / "bot_data.sqlite3"))
+SQLITE_BOOTSTRAP_FILE = _configured_db_file if not _configured_db_file.startswith(("postgresql://", "postgres://")) else str(BASE_DIR / "bot_data.sqlite3")
+DB_FILE = DATABASE_URL or _configured_db_file
 LEGACY_DB_FILE = get_str("LEGACY_DB_FILE", str(BASE_DIR / "bot_db.json"))
 BACKUP_DIR = get_str("BACKUP_DIR", str(BASE_DIR / "backups"))
 LOG_FILE = get_str("LOG_FILE", str(BASE_DIR / "logs" / "bot.log"))

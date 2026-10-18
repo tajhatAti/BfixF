@@ -1,5 +1,6 @@
 """One free video per explicit group /start; no unsolicited group blasting."""
 import asyncio
+import random
 import time
 from telethon import events, Button
 from app import runtime
@@ -10,6 +11,31 @@ from app.services import access, flow, forcejoin, settings, sender
 from app.storage import db
 
 _locks = {}
+_wait_notice: dict[tuple, float] = {}      # (chat, user) -> last time we told them to wait
+
+
+async def _tell_to_wait(event, user_id, seconds: int) -> None:
+    """Tell someone who taps /start again too soon how long to wait (short-lived reply)."""
+    now = time.time()
+    key = (event.chat_id, user_id)
+    if now - _wait_notice.get(key, 0) < 5:      # never answer a spammer with spam
+        return
+    if len(_wait_notice) > 2000:
+        _wait_notice.clear()
+    _wait_notice[key] = now
+    try:
+        note = await event.reply(f'⏳ আরেকটু অপেক্ষা করুন — {seconds} সেকেন্ড পর আবার /start দিন।')
+    except Exception as exc:
+        log.debug('wait notice failed: %s', exc)
+        return
+
+    async def _cleanup():
+        await asyncio.sleep(8)
+        try:
+            await note.delete()
+        except Exception:
+            pass
+    runtime.spawn(_cleanup())
 
 
 def buttons(file_id=0):
@@ -53,9 +79,13 @@ async def promote(event, user_id, store_id=None):
         last = float(db.get_meta(key, '0') or 0)
         cooldown = max(30, settings.get_int('GROUP_PROMO_COOLDOWN', 60))
         if time.time() - last < cooldown:
+            await _tell_to_wait(event, user_id, int(cooldown - (time.time() - last)) + 1)
             return
-        candidates = [row for row in db.public_gallery(limit=100, kind='Video')
+        # Random over the whole library (the old newest-100 list kept repeating the
+        # same two videos in every group).
+        candidates = [row for row in db.public_gallery(limit=5000, kind='Video')
                       if (not store_id or row['store_id'] == store_id)]
+        random.shuffle(candidates)
         # A per-store required channel must never be bypassed by a generic /start.
         chosen = None
         blocked = None

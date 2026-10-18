@@ -3,7 +3,7 @@ import hashlib
 from functools import lru_cache
 from pathlib import Path
 
-BUILD = 'desi-2026.10.18-group-join-recovery'
+BUILD = 'desi-2026.10.18-supabase'
 
 
 @lru_cache(maxsize=1)

@@ -8,3 +8,6 @@ telethon>=1.34,<2
 fastapi>=0.110
 uvicorn>=0.27
 python-multipart>=0.0.9      # admin panel form posts (FastAPI Form/UploadFile)
+
+# PostgreSQL / Supabase backend (binary wheels; no compiler or pg_config needed)
+psycopg[binary]>=3.2,<4

@@ -2,7 +2,7 @@
 
 ## চালানোর আগে
 
-- নতুন build: `desi-2026.10.18-group-join-recovery / <hash>`। `/version` দিয়ে মিলিয়ে নিন।
+- নতুন build: `desi-2026.10.18-supabase / <hash>`। `/version` দিয়ে মিলিয়ে নিন।
 - Telegram-এর command menu-তে শুধু `/start`। Admin-ও একই menu পাবেন। `/help` লিখলে
   পূর্ণ admin catalogue; সাধারণ ইউজার admin catalogue দেখবেন না। Help বাটন নিজে
   থেকে পূর্ণ admin list ঢেলে দেবে না। Startup notice-ও সংক্ষিপ্ত।
@@ -56,17 +56,13 @@ Setup/login/পুরোনো form surfaces-সহ black/yellow theme এবং
 16px inputs, table overflow ও single-column layout উন্নত করা হয়েছে। বাস্তব ফোনের
 browser ও live Telegram/network-এ deployment verification এখনও প্রয়োজন।
 
-## Database URL — এখনও অসম্পূর্ণ
+## Database URL — PostgreSQL support
 
-এই release PostgreSQL backend যোগ করে না। `DATABASE_URL` বা `PG_SSLMODE` দিলেই
-SQLite থেকে Supabase-এ migration হবে না। Website-এও কার্যকর PostgreSQL connect
-form নেই। ভুল ভরসায় পুরোনো DB মুছবেন না বা URL-কে `DB_FILE` হিসেবে দেবেন না।
-
-Supabase password chat-এ প্রকাশিত হলে আগে provider dashboard থেকে rotate করুন।
-Connection URI-তে embedded password error report-এ redact করা হয়। Native PostgreSQL
-support-এর জন্য schema/SQL adapter, migrations, transaction/lease semantics,
-existing SQLite backup import/export এবং restore rollback integration tests আলাদাভাবে
-সম্পন্ন করতে হবে। বর্তমানে durable SQLite disk ও backup-ই সমর্থিত পথ।
+এই সংস্করণে PostgreSQL adapter, পুরোনো SQLite bootstrap/import এবং PostgreSQL থেকে
+পুরোনো `.bfixf.gz` backup/restore যোগ হয়েছে। Environment variable দিতে হবে না:
+`database.private.json` অথবা `/setup`-এ private configuration upload করুন। বিস্তারিত:
+[SUPABASE_SETUP.md](SUPABASE_SETUP.md)। Supabase-এর public tables ছোঁয়া হয় না;
+অ্যাপের নিজস্ব `bfixf` schema ব্যবহার হয়। Live Supabase connection এখনও এখানে যাচাই হয়নি।
 
 Reference checked: Telethon's forwarding implementation documents that removing
 media captions requires dropping the author too:

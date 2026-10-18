@@ -1,6 +1,7 @@
 """Persist technical errors; privately alert only the first/owner admin.
 
-Identical alerts are coalesced for a minute, but occurrences stay in the DB.
+Alerts of the same kind (file/store numbers ignored) are coalesced for 30 minutes
+and report how many were held back; every occurrence stays in the DB.
 Notification failures never feed back into logging. No raw message/session input
 is included in handler context. /errors is owner-only.
 """
@@ -16,7 +17,48 @@ from app import config as cfg
 from app.storage import db
 
 _sending = contextvars.ContextVar('error_alert_sending', default=False)
-_seen: dict[str, float] = {}
+#: alert key -> [time last sent, how many identical ones were held back since]
+_seen: dict[str, list] = {}
+ALERT_WINDOW = 30 * 60
+
+_ENTITY_RAW = re.compile(r'Could not find the input entity for .*?(?:entities\.html[^\n]*|$)', re.I)
+_ENTITY_TEXT = ('এই সেশনের অ্যাকাউন্ট চ্যানেলটি চেনে না — অ্যাকাউন্টটি চ্যানেলের সদস্য কিনা '
+                '(আর্কাইভ ফোল্ডারসহ) দেখুন')
+_INVALID_TEXT = 'চ্যানেলের সংরক্ষিত অ্যাক্সেস কোড পুরনো — বট নিজে আবার শিখে নেবে'
+_INTERNAL_TEXT = 'Telegram-এ সাময়িক সমস্যা চলছে, কিছুক্ষণ পরে আবার চেষ্টা হবে'
+
+
+def friendly_error(value) -> str:
+    """Plain Bengali for a raw Telegram error; unknown errors come back unchanged."""
+    text = str(value)
+    low = text.lower()
+    if 'input entity' in low or 'cannot find any entity' in low:
+        return _ENTITY_TEXT
+    if 'invalid channel' in low or 'channel invalid' in low or 'channel_invalid' in low:
+        return _INVALID_TEXT
+    if 'internal issues' in low or 'rpccallfail' in low:
+        return _INTERNAL_TEXT
+    return text
+
+
+def _friendly_alert(text: str) -> str:
+    """Swap the raw Telethon sentences inside an alert for plain Bengali."""
+    text = _ENTITY_RAW.sub(_ENTITY_TEXT, text)
+    text = re.sub(r'Invalid channel object[^\n]*', _INVALID_TEXT, text, flags=re.I)
+    text = re.sub(r'Telegram is having internal issues[^\n]*?(?=\(caused|\n|$)', _INTERNAL_TEXT + ' ',
+                  text, flags=re.I)
+    return text
+
+
+#: Known harmless channel/copy noise: still saved in the DB (/errors), never sent to Telegram.
+_QUIET = ('mirror of file', 'video archive store=', 'source read failed', 'storage channel unreachable',
+          'input entity', 'invalid channel', 'channel invalid', 'peer id invalid',
+          'internal issues', 'rpccallfail')
+
+
+def _alert_key(text: str) -> str:
+    """Same kind of error = same key, whatever the file/store/channel numbers are."""
+    return re.sub(r'\d+', '#', text)
 
 
 def redact(value: str) -> str:
@@ -42,12 +84,22 @@ class OwnerErrors(logging.Handler):
             # Don't accidentally create a second/default DB during early startup.
             if getattr(db, '_impl', None) is not None:
                 db.log_event('admin_error', None, None, None, record.name, text)
+            if any(mark in text.lower() for mark in _QUIET):
+                return
+            alert = _friendly_alert(text)
+            key = _alert_key(alert)
             now = time.time()
-            if now - _seen.get(text, 0) < 60:
+            entry = _seen.get(key)
+            if entry and now - entry[0] < ALERT_WINDOW:
+                entry[1] += 1
                 return
             if len(_seen) > 500:
                 _seen.clear()
-            _seen[text] = now
+            held = entry[1] if entry else 0
+            _seen[key] = [now, 0]
+            if held:
+                alert += f'\n(একই ধরনের আরও {held}টি সতর্কতা চেপে রাখা হয়েছিল)'
+            text = alert
             loop = asyncio.get_running_loop()
             token = _sending.set(True)
             try:

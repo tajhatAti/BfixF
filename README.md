@@ -737,3 +737,10 @@ DB_FILE=preview.sqlite3 .venv/bin/python tools/seed_demo.py          # ডেম
 অটো পেমেন্ট ভেরিফিকেশন (bKash/Nagad API) · A/B ব্রডকাস্ট টেস্ট · ইউজারের জন্য
 পার্সোনাল রেকমেন্ডেশন · “শেষ দেখেছিলেন সেখান থেকে” রিজিউম · চ্যানেল পোস্টের
 শিডিউল কলেন্ডার · ভিডিওর ভেতরে ওয়াটারমার্ক · বট-থেকে-বট মিরর (একাধিক বটে লোড ভাগ)।
+
+
+## Supabase / PostgreSQL — environment ছাড়াই
+
+এই release-এ `database.private.json` থেকে PostgreSQL connection নেওয়া যায়; `/setup`-এ
+configuration-file upload-ও আছে। পুরোনো SQLite ডেটা ও portable backup সমর্থিত আছে।
+নির্দেশনা ও সীমাবদ্ধতা: [SUPABASE_SETUP.md](SUPABASE_SETUP.md)।

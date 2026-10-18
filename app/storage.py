@@ -565,15 +565,35 @@ def _json_int_list(raw: Any) -> list[int]:
 class Database:
     def __init__(self, path: str):
         self.path = path
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.execute("PRAGMA busy_timeout=10000")
-        self.conn.executescript(SCHEMA)
-        self._upgrade()
-        self.conn.commit()
+        self.backend = 'postgresql' if str(path).startswith(('postgresql://', 'postgres://')) else 'sqlite'
+        if self.backend == 'postgresql':
+            from app.postgres import Connection
+            self.conn = Connection(path, SCHEMA, sslmode=getattr(cfg, 'PG_SSLMODE', 'require'))
+            try:
+                with self.conn.transaction():
+                    self.conn.raw.execute('SELECT pg_advisory_xact_lock(182861, 1)')
+                    self.conn.executescript(SCHEMA)
+                    self._upgrade()
+            except Exception:
+                self.conn.close()
+                raise
+        else:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
+            self.conn.execute("PRAGMA busy_timeout=10000")
+            self.conn.executescript(SCHEMA)
+            self._upgrade()
+            self.conn.commit()
+
+    @property
+    def display_path(self):
+        if self.backend == 'postgresql':
+            from urllib.parse import urlsplit
+            return 'PostgreSQL · ' + (urlsplit(self.path).hostname or '') + ' / bfixf'
+        return self.path
 
     def _upgrade(self) -> None:
         """Add columns that were introduced after the first release."""
@@ -1501,7 +1521,10 @@ class Database:
                           encoding="utf-8")
         # copy the raw sqlite file too — it is the real backup
         try:
-            shutil.copy2(self.path, directory_path / f"bot_data-{stamp}.sqlite3")
+            if self.backend == 'postgresql':
+                (directory_path / f"bot_data-{stamp}.sqlite3").write_bytes(self.conn.snapshot())
+            else:
+                shutil.copy2(self.path, directory_path / f"bot_data-{stamp}.sqlite3")
         except Exception as exc:  # pragma: no cover
             log.warning("sqlite backup copy failed: %s", exc)
         backups = sorted(directory_path.glob("bot_data-*"))
@@ -1902,13 +1925,13 @@ class Database:
             "SELECT e.store_id AS id, COALESCE(s.name, '?') AS name, COUNT(*) AS hits, "
             "COUNT(DISTINCT e.name) AS kinds, MAX(e.ts) AS last_ts "
             "FROM events e LEFT JOIN stores s ON s.id = e.store_id "
-            "WHERE e.user_id = ? AND e.store_id IS NOT NULL GROUP BY e.store_id ORDER BY hits DESC",
+            "WHERE e.user_id = ? AND e.store_id IS NOT NULL GROUP BY e.store_id, s.name ORDER BY hits DESC",
             (user_id,))]
         out["videos"] = [dict(r) for r in self._q(
             "SELECT e.file_id AS id, COALESCE(f.name, 'deleted') AS name, COUNT(*) AS hits, "
             "MAX(e.ts) AS last_ts FROM events e LEFT JOIN files f ON f.id = e.file_id "
             "WHERE e.user_id = ? AND e.file_id IS NOT NULL AND e.name IN ('deliver','view_file') "
-            "GROUP BY e.file_id ORDER BY hits DESC LIMIT 40", (user_id,))]
+            "GROUP BY e.file_id, f.name ORDER BY hits DESC LIMIT 40", (user_id,))]
         orders = self.orders_for(user_id) if hasattr(self, "orders_for") else []
         out["orders"] = [dict(o) for o in orders]
         grants = self.grants_for(user_id) if hasattr(self, "grants_for") else []
@@ -1934,7 +1957,7 @@ class Database:
             "COUNT(DISTINCT e.file_id) AS videos, COUNT(*) AS sends, MAX(e.ts) AS last_ts "
             "FROM events e LEFT JOIN users u ON u.user_id = e.user_id "
             "WHERE e.store_id = ? AND e.name = 'deliver' AND e.user_id IS NOT NULL "
-            "GROUP BY e.user_id ORDER BY videos DESC, last_ts DESC LIMIT ?", (store_id, limit))]
+            "GROUP BY e.user_id, u.name, u.username ORDER BY videos DESC, last_ts DESC LIMIT ?", (store_id, limit))]
         out["funnel"] = self.store_funnel(store_id)
         return out
 
@@ -1961,7 +1984,7 @@ class Database:
             "COUNT(*) AS hits, MAX(e.ts) AS last_ts FROM events e "
             "LEFT JOIN users u ON u.user_id = e.user_id "
             "WHERE e.file_id = ? AND e.name = 'deliver' AND e.user_id IS NOT NULL "
-            "GROUP BY e.user_id ORDER BY last_ts DESC LIMIT ?", (file_id, limit))]
+            "GROUP BY e.user_id, u.name, u.username ORDER BY last_ts DESC LIMIT ?", (file_id, limit))]
 
     def unique_viewers(self, file_id: int) -> int:
         row = self._one("SELECT COUNT(DISTINCT user_id) AS c FROM events "
@@ -2700,7 +2723,27 @@ class _LazyDB:
         self._impl: Database | None = None
 
     def bind(self, path: str) -> Database:
-        self._impl = Database(path)
+        candidate = Database(path)
+        try:
+            if candidate.backend == 'postgresql' and str(path) == str(cfg.DB_FILE):
+                source = Path(getattr(cfg, 'SQLITE_BOOTSTRAP_FILE', 'bot_data.sqlite3'))
+                if source.is_file() and source.stat().st_size and not any(
+                        candidate._one(f'SELECT 1 FROM "{table}" LIMIT 1') for table in candidate.conn.metadata):
+                    # Startup runs before the bot/web workers. Import is transactional,
+                    # never deletes the source and refuses a populated destination.
+                    original = sqlite3.connect(f'file:{source}?mode=ro', uri=True)
+                    snapshot = sqlite3.connect(':memory:')
+                    try:
+                        original.backup(snapshot)
+                        candidate.conn.import_sqlite(snapshot.serialize())
+                        log.info('Existing SQLite database imported into PostgreSQL; original retained')
+                    finally:
+                        original.close()
+                        snapshot.close()
+        except Exception:
+            candidate.conn.close()
+            raise
+        self._impl = candidate
         return self._impl
 
     @property

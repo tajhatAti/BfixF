@@ -127,7 +127,7 @@ def describe(store_id: int) -> str:
     states = {'queued': 'কিউতে', 'paused': 'বিরতিতে', 'stopped': 'বন্ধ', 'done': 'শেষ'}
     errors = db._q("SELECT file_id,last_error FROM video_copy_items WHERE store_id=? AND last_error!='' "
                    'ORDER BY file_id DESC LIMIT 2', (store_id,))
-    details = ''.join(f"\n⚠️ #{r['file_id']}: {esc(r['last_error'][:160])}" for r in errors)
+    details = ''   # per-file errors stay in the DB; the card shows counts only
     destination = f'<code>{esc(target)}</code>' if target else 'এখনো তৈরি হয়নি'
     publish = store.get('publish_channel_id')
     if publish and str(publish) != target:
@@ -212,14 +212,19 @@ async def _copy(item: dict) -> None:
     except Exception as exc:
         if db.impl is not bound:
             return
-        tracker.phase('failed', detail=str(exc))
-        log.warning('Video archive store=%s file=%s: %s', store_id, file_id, exc)
+        from app.services.error_reports import friendly_error
+        reason = friendly_error(exc)
+        low = f'{exc} {reason}'.lower()
+        permanent = any(m in low for m in ('input entity', 'invalid channel', 'চ্যানেলটি পড়তে পারছে না',
+                                           'চ্যানেলটি চেনে না'))
+        tracker.phase('failed', detail='স্কিপ করা হয়েছে')
+        log.warning('Video archive store=%s file=%s: %s', store_id, file_id, reason)
         # Detailed diagnostic is admin-only, never a public media response.
         attempts = db._one('SELECT attempts FROM video_copy_items WHERE store_id=? AND file_id=?',
                            (store_id, file_id))['attempts']
         db._run("UPDATE video_copy_items SET state=?,ready_at=?,last_error=? WHERE store_id=? AND file_id=?",
-                ('failed' if attempts >= 3 else 'pending', time.time() + 60,
-                 str(exc)[:500], store_id, file_id))
+                ('failed' if (permanent or attempts >= 3) else 'pending', time.time() + 60,
+                 reason[:500], store_id, file_id))
     finally:
         # This paces every slot, not just the task that finished last.
         await asyncio.sleep(max(0, min(30, settings.get_int('VIDEO_COPY_DELAY', 0))))
