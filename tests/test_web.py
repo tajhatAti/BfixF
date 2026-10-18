@@ -1329,6 +1329,7 @@ def test_a_new_host_can_restore_from_the_setup_screen(tmp_path, monkeypatch):
                           files={"file": ("move.bfixf.gz", backup, "application/gzip")},
                           data={"confirm": "yes"}, follow_redirects=False)
     assert response.status_code == 303
+    assert response.headers['location'] == '/admin'
     assert db.stats()["users"] >= 1 and db.all_stores()[0]["name"] == "Origin store"
     assert db.user_peer(USER_ID)["access_hash"] == 4242         # broadcasts still work
 
@@ -1400,3 +1401,20 @@ def test_a_standalone_bots_user_list_merges_into_the_panel(client, tmp_path):
     assert db.user(7001) is not None and db.user(7002) is not None
     page = client.get("/admin/backup", headers=_auth()).text
     assert "যোগ করা হয়েছে" in page and "কিছুই মুছে যায়নি" in page
+
+
+@pytest.mark.parametrize('prefix', ['', '/live/example'])
+def test_setup_restore_redirect_is_not_relative_to_post_url(client, prefix):
+    response = client.post('/setup/restore', data={'confirm': 'yes'},
+                           headers={**_auth(), 'x-forwarded-prefix': prefix},
+                           follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers['location'].startswith(prefix + '/setup?')
+    assert '/setup/setup' not in response.headers['location']
+
+
+def test_setup_save_script_distinguishes_login_html_and_http_failure(client):
+    page = client.get('/setup', headers=_auth()).text
+    assert 'async function setupJSON' in page
+    assert 'response.redirected' in page and "response.status === 401" in page
+    assert "await setupJSON(r)" in page

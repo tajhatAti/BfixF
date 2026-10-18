@@ -107,6 +107,29 @@ python run.py
 
 ---
 
+## Render: Python Web Service
+
+- New → Web Service → এই repository সংযুক্ত করুন। Branch:
+  `arena/182861c6-bfixf` (PR merge না হওয়া পর্যন্ত `main` নয়)।
+- Language/Runtime: **Python 3**; Root Directory খালি (repository root)।
+- Build Command: `pip install -r requirements.txt`
+- Start Command: `python main.py`
+- Health Check Path: `/health`; Render-এর `PORT` নিজে থেকে ব্যবহৃত হয়।
+- Environment-এ `BOT_TOKEN`, `API_ID`, `API_HASH`, `ADMIN_IDS` দিন।
+  `SITE_URL=https://YOUR-SERVICE.onrender.com` দিন—পুরোনো CodeNest `/live/...` URL নয়।
+  `WEB_HOST=0.0.0.0`। Credential/token কখনো chat বা screenshot-এ প্রকাশ করবেন না।
+- Deploy শেষে `/admin/login` → login → `/setup`। Restore-এর আলাদা GET পেজ নেই;
+  `/setup`-এর restore form-এ ফাইল বাছুন ও confirmation দিয়ে submit করুন। সঠিক endpoint
+  `/setup/restore` (বানান `resotre` নয়); এটি POST-only। আগে configured হলে
+  `/admin/backup` দিয়েও restore করা যায়।
+- SQLite-এর জন্য durable disk লাগবে। Disk-সমর্থিত plan-এ `/var/data` mount করে:
+  `DB_FILE=/var/data/bot_data.sqlite3`,
+  `SESSION_STATE_FILE=/var/data/bot_master.session`,
+  `BACKUP_DIR=/var/data/backups` দিন। Disk ছাড়া local files redeploy/restart-এ
+  হারাতে পারে; sleep হওয়া plan-এ bot-ও সবসময় online থাকবে না।
+- একই bot token পুরোনো host ও নতুন host-এ একসঙ্গে চালাবেন না। পুরোনো host থেকে
+  backup নামিয়ে নিরাপদে রাখুন, পুরোনো bot বন্ধ করে নতুন host-এ restore/verify করুন।
+
 ## ২. CodeNest-এ পাবলিশ (আপনার সাইট)
 
 1. **টোকেন রিভোক করে নতুন নিন** — BotFather → `/mybots` → API Token → Revoke.

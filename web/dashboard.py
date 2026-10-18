@@ -1138,9 +1138,19 @@ function fe(field, msg) {
   const box = document.querySelector('[data-fe="' + field + '"]'); if (box) box.textContent = msg;
   const inp = document.querySelector('[name="' + field + '"]'); if (inp) { inp.classList.add('bad-in'); inp.focus(); }
 }
+async function setupJSON(response) {
+  if (response.redirected || response.status === 401 || response.status === 403) {
+    throw new Error('লগইন সেশন শেষ হয়েছে। /admin/login থেকে আবার লগইন করে setup খুলুন।');
+  }
+  if (!response.ok) throw new Error('সার্ভার HTTP ' + response.status + ' দিয়েছে। Hosting logs দেখুন।');
+  if (!(response.headers.get('content-type') || '').includes('application/json')) {
+    throw new Error('সার্ভার থেকে JSON-এর বদলে অন্য পেজ এসেছে। সঠিক site URL এবং admin login পরীক্ষা করুন।');
+  }
+  return response.json();
+}
 async function poll(started) {
   try {
-    const r = await fetch('setup/status', {cache: 'no-store'}); const j = await r.json();
+    const r = await fetch('setup/status', {cache: 'no-store'}); const j = await setupJSON(r);
     if (j.state === 'online') {
       prog.style.display = 'none'; done.style.display = 'block';
       $('#who').textContent = j.username ? '@' + j.username : '';
@@ -1160,11 +1170,11 @@ form.addEventListener('submit', async (ev) => {
   const btn = $('#go'); btn.disabled = true; btn.textContent = 'যাচাই হচ্ছে…';
   try {
     const r = await fetch('setup/save', {method: 'POST', body: new URLSearchParams(new FormData(form))});
-    const j = await r.json();
+    const j = await setupJSON(r);
     if (!j.ok) { fe(j.field, j.error); btn.disabled = false; btn.textContent = '✅ যাচাই করে বট চালু করুন'; return; }
     form.style.display = 'none'; prog.style.display = 'block'; $('#ptxt').textContent = 'টোকেন ঠিক আছে ✓ বট চালু হচ্ছে…';
     poll(Date.now());
-  } catch (e) { fe('token', 'সার্ভারের সাথে যোগাযোগ হয়নি — আবার চেষ্টা করুন।'); btn.disabled = false; btn.textContent = '✅ যাচাই করে বট চালু করুন'; }
+  } catch (e) { fe('token', e.message || 'সার্ভারের সাথে যোগাযোগ হয়নি — আবার চেষ্টা করুন।'); btn.disabled = false; btn.textContent = '✅ যাচাই করে বট চালু করুন'; }
 });
 """
 
@@ -1337,7 +1347,7 @@ def create_app() -> FastAPI:
         # (password-protected) setup page while the bot is not configured yet.
         if (not credentials.is_configured() and path.startswith("/admin")
                 and not path.startswith(("/admin/login", "/admin/logout"))):
-            return RedirectResponse("setup", status_code=303)
+            return RedirectResponse("/setup", status_code=303)
         return await call_next(request)
 
     @app.post("/setup/restore")
@@ -1356,7 +1366,7 @@ def create_app() -> FastAPI:
             if blocked:
                 return blocked
         if (confirm or "").strip().lower() not in ("yes", "on", "1"):
-            return RedirectResponse("setup?restore=1&warn=Tick+the+box", status_code=303)
+            return RedirectResponse(basepath.url("/setup?restore=1&warn=Tick+the+box"), status_code=303)
         blob = b""
         if file is not None and getattr(file, "filename", ""):
             blob = await file.read()
@@ -1364,20 +1374,20 @@ def create_app() -> FastAPI:
             try:
                 blob = portable_service.decode_text(code)
             except portable_service.BackupError as exc:
-                return RedirectResponse(f"setup?restore=1&warn={str(exc)[:150]}",
+                return RedirectResponse(basepath.url(f"/setup?restore=1&warn={str(exc)[:150]}"),
                                         status_code=303)
         if not blob:
-            return RedirectResponse("setup?restore=1&warn=No+file+or+code", status_code=303)
+            return RedirectResponse(basepath.url("/setup?restore=1&warn=No+file+or+code"), status_code=303)
         ok, message = _run_restore(blob, "setup page")
         if not ok:
-            return RedirectResponse(f"setup?restore=1&warn={message[:150]}", status_code=303)
+            return RedirectResponse(basepath.url(f"/setup?restore=1&warn={message[:150]}"), status_code=303)
         # credentials may have come back with the database → the bot can start now.
         try:
             credentials.load()
             credentials.poke()          # wake run.bot_worker without a restart
         except Exception:
             log.debug("credential reload after restore failed", exc_info=True)
-        return RedirectResponse("admin", status_code=303)
+        return RedirectResponse(basepath.url("/admin"), status_code=303)
 
     @app.get("/setup", response_class=HTMLResponse)
     async def setup_view(request: Request):
