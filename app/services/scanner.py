@@ -81,6 +81,11 @@ async def _run(admin_id: int, iterator, title: str, chat_id: int, store_id: int,
         raise
     finally:
         SCANS.pop(admin_id, None)
+        if archive:
+            # Saved videos must not be orphaned if pagination/network fails.
+            from app.services import video_copy
+            video_copy.enqueue(store_id, admin_id, chat_id)
+            video_copy.kick()
     if found:
         db.log_event("scan", admin_id, store_id, None, str(chat_id),
                      f"scanned={scanned} found={found}")
@@ -93,10 +98,6 @@ async def _run(admin_id: int, iterator, title: str, chat_id: int, store_id: int,
                 spawn(warm_all())
         except Exception as exc:
             log.debug("could not start the media cache warm-up: %s", exc)
-    if archive:
-        from app.services import video_copy
-        video_copy.enqueue(store_id, admin_id, chat_id)
-        video_copy.kick()
     return {"copy_queued": archive, "scanned": scanned, "found": found, "title": title, "store_id": store_id}
 
 

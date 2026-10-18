@@ -6,7 +6,6 @@ legitimate source access. Only exact registered broadcast channels accept links.
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import shutil
 import tempfile
@@ -125,6 +124,10 @@ async def album(client, peer, message_id: int) -> list:
 
 async def transfer(client, peer, message, target: int):
     """True photo/video uploads with no caption/protection; all temps scoped."""
+    from app.services.transfer_progress import Tracker
+    info = channel(target) or {}
+    tracker = Tracker(f'channel:{target}', message.id, info.get('admin_id', 0), f'পোস্টের মিডিয়া #{message.id}')
+    tracker.phase('prepare')
     size = int(getattr(getattr(message, 'file', None), 'size', 0) or 0)
     max_mb = settings.get_int('MIRROR_MAX_MB', 1900)
     if max_mb and size > max_mb * 1024 * 1024:
@@ -138,7 +141,8 @@ async def transfer(client, peer, message, target: int):
         media_cache._reserved_downloads[reservation] = required
         try:
             path = str(Path(directory) / ('media' + native_media.extension(message)))
-            if not await media_cache._download(client, message, path, size):
+            tracker.phase('download', size)
+            if not await media_cache._download(client, message, path, size, progress=tracker.callback):
                 raise ValueError('মিডিয়া ডাউনলোড করা যায়নি।')
             kwargs = native_media.upload_options(message)
             if native_media.is_video(message):
@@ -152,11 +156,17 @@ async def transfer(client, peer, message, target: int):
                     log.debug('Optional thumbnail unavailable: %s', exc)
                 if Path(thumb).exists() and Path(thumb).stat().st_size:
                     kwargs['thumb'] = thumb
+            tracker.phase('upload', Path(path).stat().st_size)
+            kwargs['progress_callback'] = tracker.callback
             sent = await safe_call(client.send_file, peer, path, caption='',
                                    **kwargs, what='restricted_upload', retries=1)
             if not sent or not getattr(sent, 'media', None):
                 raise RuntimeError('মিডিয়া আপলোড নিশ্চিত করা যায়নি।')
+            tracker.phase('done', detail='ডাউনলোড চ্যানেলে আপলোড হয়েছে।')
             return sent
+        except BaseException as exc:
+            tracker.phase('waiting' if isinstance(exc, asyncio.CancelledError) else 'failed', detail=str(exc))
+            raise
         finally:
             media_cache._reserved_downloads.pop(reservation, None)
 
@@ -263,7 +273,7 @@ async def _run() -> None:
 
 def kick() -> None:
     global _task
-    if os.getenv('BOT_EXTRA') == '1' or (_task is not None and not _task.done()):
+    if _task is not None and not _task.done():
         return
     _task = runtime.spawn(_run())
 

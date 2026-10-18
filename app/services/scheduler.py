@@ -312,21 +312,24 @@ async def mirror_loop() -> None:
     ended in FloodWait every time a few users clicked the same video.
     """
     from app.services.media_cache import warm_mirrors
-    await asyncio.sleep(45)                       # let the bot settle after boot
+    warm_task = None
     while True:
         try:
             from app.services import video_copy, restricted
+            # Never wait for a large legacy cache download before waking durable
+            # scan/post queues. Previously this loop could be blocked for hours.
             restricted.kick()
             video_copy.kick()
-            if not db.missing_mirrors(1):
-                await asyncio.sleep(20)
-                continue
-            result = await warm_mirrors(limit=8, delay=2.0)
-            if result["mirrored"]:
-                log.info("Media cache: %s file(s) mirrored, %s waiting",
-                         result["mirrored"], result["ready"]["missing"])
-        except Exception as exc:                  # never let a worker die
-            log.error("mirror loop error: %s", exc)
+            if warm_task is not None and warm_task.done():
+                result = warm_task.result()
+                if result.get('mirrored'):
+                    log.info('Media cache: %s mirrored', result['mirrored'])
+                warm_task = None
+            if warm_task is None and db.missing_mirrors(1):
+                warm_task = runtime.spawn(warm_mirrors(limit=8, delay=2.0))
+        except Exception as exc:
+            warm_task = None
+            log.error('mirror loop error: %s', exc)
         await asyncio.sleep(20)
 
 

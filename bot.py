@@ -48,9 +48,12 @@ async def on_startup(client: TelegramClient) -> None:
              stats["users"], stats["files"], stats["stores"], stats["grants"])
 
     await seed_and_reconnect_sessions()
-    await prepare_media_cache()
     if os.getenv("BOT_EXTRA") != "1":
-        scheduler.start_all()  # one owner of broadcasts/backups, never duplicate jobs
+        scheduler.start_all()
+    else:
+        from app.services import video_copy
+        runtime.spawn(video_copy.monitor())  # shared lease, no duplicate broadcasts
+    runtime.spawn(prepare_media_cache())
 
 
 async def prepare_media_cache() -> None:

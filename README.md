@@ -1,3 +1,24 @@
+## স্ক্যানের পর auto-copy recovery + বটের live transfer screen
+
+বটের Admin panel → **📥 Download / Upload লাইভ**, অথবা `/downloads`। স্টোরে ঢুকলে পাবেন:
+
+- চলমান ভিডিওর নাম ও download / thumbnail / upload / Telegram-side copy ধাপ;
+- আসল byte callback থেকে কত MiB/কত শতাংশ হয়েছে, গড় গতি এবং **বর্তমান ধাপের** আনুমানিক বাকি সময়;
+- সফল/ব্যর্থ/অপেক্ষমাণ/চলমান সংখ্যা, retry/FloodWait countdown, সেশন নেই/worker heartbeat নেই/lease ব্যস্ত—নির্দিষ্ট কারণ;
+- আসল **store cache channel**-এর ID ও খোলার বাটন। Public publish channel আলাদা হলে সেটিও জানায়; সেটিংস না বদলে ভিডিও অন্য public channel-এ publish করে না।
+
+স্টোরের অটো-প্রগ্রেস মেসেজ প্রায় ৫ সেকেন্ড পরপর আপডেট হয়; `/downloads` overview খোলার পরে সর্বোচ্চ ১০ মিনিট auto-refresh (আবার খুললে আবার শুরু)। Restricted downloader-এর byte progress-ও একই overview-তে দেখা যায়। ETA পুরো queue-এর নিশ্চয়তা নয়; source সরাসরি forward হলে server download লাগে না, তাই সেখানে ভুয়া MB/ETA দেখায় না।
+
+### যে auto-start সমস্যাগুলো সংশোধিত
+
+1. স্ক্যান মাঝপথে নেটওয়ার্কে ব্যর্থ হলেও তার আগেই সেভ হওয়া ভিডিও এখন finally-block থেকে queue-তে যায়।
+2. আগের scan-এর `FILE_*` rows / scan-audit মিলে এমন missing jobs startup বা `/downloads` থেকে backfill হয়—পুরোনো পোস্ট বা source ID বদলানো ছাড়াই। Manual upload এবং explicit Pause/Stop অপরিবর্তিত।
+3. scheduler জাগানোর আগে channel bootstrap শেষ হওয়ার অপেক্ষা করে না; বড় legacy warmup-ও আর queue wakeup আটকে রাখে না।
+4. Backup/extra bot-এ scan করলেও সেটির আলাদা transfer monitor চলে। মূল বটের ওপর একা নির্ভর করে না; SQLite shared lease-এর জন্য একসঙ্গে সর্বোচ্চ ৩টি transfer-ই চলে, duplicate broadcast scheduler শুরু হয় না। যে worker কাজ করবে সেখানে মালিকের সংযুক্ত session লাগবে।
+5. Session না থাকলে নীরবে থেমে থাকা বা queued-কে “চলছে” বলা বন্ধ। ডেটাবেজে blocker/progress থাকে, retry বাটনও থাকে। Pause/Stop নিজে থেকে তুলে দেওয়া হয় না।
+
+**যাচাই:** ৫৭৯টি offline test, নতুন ১৭টি progress/recovery test-সহ; scan → স্বয়ংক্রিয় download → upload এবং byte callbacks-সহ integration test আছে। Production Telegram transfer/হোস্টের লগ আলাদাভাবে যাচাই করতে হবে। পরিবর্তন চালু করতে hosting-এ এই branch deploy/restart করুন।
+
 ## শুধু ভিডিও স্ক্যান + Restricted download
 
 - সেশন ও bot scan দুটিতেই Telegram video filter এবং ভিডিও-only যাচাই। ছবি/ডকুমেন্ট স্ক্যানে নতুন করে ঢুকবে না; manual upload-এর আলাদা নীতি অপরিবর্তিত। Bot scan-এর ভিডিওও store archive queue-তে যায় (copy করতে মালিকের সেশন লাগবে)।

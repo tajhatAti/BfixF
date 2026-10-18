@@ -462,18 +462,20 @@ async def _media_from(client, chat_id: int, msg_id: int):
     return msg
 
 
-async def _download(client, message, path: str, size: int | None = None) -> bool:
+async def _download(client, message, path: str, size: int | None = None,
+                    progress=None) -> bool:
     """Download a message's media to `path` (ranged for big files)."""
     try:
         if size and size > 5 * CHUNK:
-            await _download_ranged(client, message, path, size)
+            await _download_ranged(client, message, path, size, progress=progress)
             return os.path.exists(path) and os.path.getsize(path) > 0
     except FloodWaitError:
         raise
     except Exception as exc:
         log.debug("ranged download failed (%s) — falling back", exc)
     try:
-        await safe_call(client.download_media, message, file=path, what="mirror_download", retries=1)
+        options = {"progress_callback": progress} if progress else {}
+        await safe_call(client.download_media, message, file=path, what="mirror_download", retries=1, **options)
         return os.path.exists(path) and os.path.getsize(path) > 0
     except FloodWaitError:
         raise
@@ -482,7 +484,7 @@ async def _download(client, message, path: str, size: int | None = None) -> bool
         return False
 
 
-async def _download_ranged(client, message, path: str, size: int) -> None:
+async def _download_ranged(client, message, path: str, size: int, progress=None) -> None:
     """Bounded aligned ranges; Telegram's limit counts chunks, not bytes.
 
     Never preallocate and call a partial file a successful download. Each range
@@ -492,7 +494,9 @@ async def _download_ranged(client, message, path: str, size: int) -> None:
     parts = max(1, min(MAX_RANGED_THREADS, max(1, size // (20 * CHUNK))))
     span = ((size + parts - 1) // parts + block - 1) // block * block
 
+    completed = {}
     async def fetch(start: int, end: int) -> None:
+        origin = start
         written = 0
         with open(path, "r+b") as handle:
             async for blob in client.iter_download(message.media, offset=start,
@@ -501,6 +505,9 @@ async def _download_ranged(client, message, path: str, size: int) -> None:
                 handle.seek(start + written)
                 handle.write(blob)
                 written += len(blob)
+                completed[origin] = written
+                if progress:
+                    progress(sum(completed.values()), size)
                 if start + written >= end:
                     break
         if written != end - start:
@@ -564,6 +571,12 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
                                 *, archive: bool = False) -> dict:
 
     repository = db.impl
+    tracker = None
+    if archive:
+        from app.services.transfer_progress import Tracker
+        tracker = Tracker(f"store:{file_row['store_id']}", int(file_row['id']),
+                          int((store or {}).get('admin_id') or 0), file_row.get('name') or 'ভিডিও')
+        tracker.phase('prepare')
     # 1. Maybe the source itself is already bot-readable — then no mirror needed.
     try:
         from app.runtime import bot
@@ -578,12 +591,16 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
     if client is None:
         _note(file_row["id"], "ইউজারবট সেশন কানেক্ট নেই — ড্যাশবোর্ড/বট থেকে অ্যাডমিন সেশন কানেক্ট করুন")
         return file_row
+    if tracker:
+        tracker.phase('channel')
     peer = await store_cache_peer(client, store, dedicated=True) if archive else await store_cache_peer(client, store)
     if peer is None and not archive:
         peer = await storage_peer(client)
     if peer is None:
-        _note(file_row["id"], "ক্যাশ চ্যানেল বানানো যায়নি — একটা প্রাইভেট চ্যানেল বানিয়ে "
-                              "সেটিংসে STORAGE_CHANNEL দিন (বট ওখানে অ্যাডমিন থাকবে)")
+        _note(file_row["id"],
+              "স্টোরের আলাদা চ্যানেল তৈরি করা যায়নি — মালিকের সেশন, চ্যানেল তৈরির সীমা "
+              "এবং বটকে অ্যাডমিন করার অনুমতি পরীক্ষা করুন।" if archive else
+              "ক্যাশ চ্যানেল বানানো যায়নি — STORAGE_CHANNEL ও বটের অ্যাডমিন অনুমতি পরীক্ষা করুন।")
         return file_row
     try:
         peer = await _resolve_peer(client, peer)
@@ -620,6 +637,8 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
     try:
         from app.runtime import bot
         if archive:
+            if tracker:
+                tracker.phase('forward')
             source_peer = await _resolve_peer(client, int(file_row["chat_id"]))
             copied = await safe_call(client.forward_messages, peer, source.id,
                                      from_peer=source_peer, what="mirror_forward", retries=1)
@@ -652,7 +671,10 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
             _note(file_row['id'], "সার্ভারে পর্যাপ্ত ফাঁকা ডিস্ক নেই — ডিস্ক ফাঁকা করে আবার চেষ্টা করুন")
             return file_row
         _reserved_downloads[int(file_row['id'])] = required
-        if not await _download(client, source, tmp.name, size or None):
+        if tracker:
+            tracker.phase('download', size)
+        download_options = {'progress': tracker.callback} if tracker else {}
+        if not await _download(client, source, tmp.name, size or None, **download_options):
             _note(file_row["id"], "ভিডিও ডাউনলোড করা যায়নি (নেটওয়ার্ক/ফাইল সমস্যা)")
             return file_row
         # Keep the bytes we just downloaded: the website player can then serve this
@@ -665,6 +687,8 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
                 log.debug("caching the downloaded mirror failed: %s", exc)
         # Preserve the source's duration, dimensions and filename attributes.
         upload_options = native_media.upload_options(source, file_row.get("kind") or "")
+        if tracker:
+            tracker.phase('thumb')
         try:
             thumb_file = tempfile.NamedTemporaryFile(delete=False, prefix="bfixf-copy-", suffix=".jpg")
             thumb_path = thumb_file.name
@@ -683,6 +707,9 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
                 except OSError:
                     pass
             thumb_path = None
+        if tracker:
+            tracker.phase('upload', os.path.getsize(tmp.name))
+            upload_options['progress_callback'] = tracker.callback
         sent = await safe_call(
             client.send_file, peer, tmp.name,
             caption=clean_text(file_row.get("name") or "")[:200],
@@ -700,7 +727,7 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
     except FloodWaitError:
         raise
     except Exception as exc:
-        log.warning("mirror upload failed for %s: %s", file_row["id"], exc)
+        _note(file_row["id"], f"আপলোড ব্যর্থ: {str(exc)[:200]}")
     finally:
         _reserved_downloads.pop(int(file_row['id']), None)
         for path in (tmp.name, thumb_path):

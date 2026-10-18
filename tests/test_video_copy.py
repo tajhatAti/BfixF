@@ -190,7 +190,7 @@ class ArchiveClient:
             raise RuntimeError('CHAT_FORWARDS_RESTRICTED')
         return NS(id=42, chat_id=TARGET, media=object())
 
-    async def download_media(self, msg, file=None, thumb=None):
+    async def download_media(self, msg, file=None, thumb=None, progress_callback=None):
         self.events.append('thumb' if thumb is not None else 'download')
         self.paths.append(file)
         Path(file).write_bytes(b'jpg' if thumb is not None else b'v' * 100)
@@ -419,11 +419,17 @@ def test_database_lease_prevents_multiple_process_workers(clean, monkeypatch):
     assert video_copy._claim()
 
 
-def test_extra_bot_only_enqueues_never_starts_another_worker(clean, monkeypatch):
+def test_extra_bot_can_wake_transfer_worker_with_shared_lease(clean, monkeypatch):
     monkeypatch.setenv('BOT_EXTRA', '1')
-    monkeypatch.setattr(runtime, 'spawn', lambda _: pytest.fail('duplicate worker'))
+    spawned = []
+    def spawn(coro):
+        spawned.append(True)
+        coro.close()
+        return NS(done=lambda: False)
+    monkeypatch.setattr(runtime, 'spawn', spawn)
     video_copy.kick()
-    assert video_copy._task is None
+    video_copy.kick()
+    assert spawned == [True]
 
 
 def test_legacy_shared_mirror_is_queued_for_store_specific_archive(clean):

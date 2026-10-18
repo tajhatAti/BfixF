@@ -6,7 +6,9 @@ bulk actions, improved scan flow.
 from __future__ import annotations
 
 import time
+import asyncio
 
+from telethon import events
 from telethon.tl.custom import Button
 
 from app import config as cfg, keyboards, runtime, ui
@@ -732,6 +734,18 @@ async def video_copy_control(event, rest: str) -> None:
     if not store or (store['admin_id'] != event.sender_id and event.sender_id not in cfg.ADMIN_IDS):
         await event.answer("এই স্টোরে অনুমতি নেই", alert=True)
         return
+    if action == 'view':
+        old = _download_views.pop((runtime.bot_username, event.sender_id), None)
+        if old and not old.done():
+            old.cancel()
+        await event.answer('লাইভ অবস্থা')
+        await event.edit(video_copy.describe(store_id), buttons=video_copy.buttons(store_id))
+        message_id = getattr(event, 'message_id', 0)
+        if message_id:
+            db._run('UPDATE video_copy_jobs SET chat_id=?,message_id=? WHERE store_id=?',
+                    (event.chat_id, message_id, store_id))
+            db.set_meta(f'copy_report_bot:{store_id}', runtime.bot_username)
+        return
     if not video_copy.control(store_id, action):
         await event.answer("কপি কাজটি পাওয়া যায়নি", alert=True)
         return
@@ -739,3 +753,77 @@ async def video_copy_control(event, rest: str) -> None:
     await event.edit(video_copy.describe(store_id), buttons=video_copy.buttons(store_id))
     if action in ('resume', 'retry'):
         video_copy.kick()
+
+
+def downloads_card(admin_id):
+    from app.services import video_copy, transfer_progress
+    rows = db._q('SELECT store_id FROM video_copy_jobs ORDER BY updated_at DESC LIMIT 15')
+    buttons = []
+    lines = ['📥 <b>ডাউনলোড / অটো-আপলোড — লাইভ অবস্থা</b>',
+             'প্রতি স্টোরে ঢুকলে চলমান ভিডিও, MB, গতি, আনুমানিক সময় ও আটকে থাকার কারণ দেখবেন।']
+    for row in rows:
+        store = db.store(row['store_id'])
+        if not store:
+            continue
+        info = video_copy.summary(store['id'])
+        counts = info['counts']
+        buttons.append([Button.inline(f"📥 {store['name'][:28]} · {counts.get('done',0)}/{info['total']}",
+                                      f"vc:view:{store['id']}")])
+    if not buttons:
+        lines.append('এখনো কোনো স্ক্যান-কপি কাজ নেই। স্টোরে ভিডিও স্ক্যান করুন।')
+    lines.append('\n<b>সর্বশেষ transfer</b>\n' + transfer_progress.render(owner=admin_id))
+    buttons.append([Button.inline('🔄 আবার দেখুন', 'downloads')])
+    return '\n'.join(lines), buttons
+
+
+_download_views = {}
+
+
+async def show_downloads(event):
+    from app.services import video_copy
+    if not access.is_admin(event.sender_id):
+        return
+    video_copy.backfill()
+    video_copy.kick()
+    text, buttons = downloads_card(event.sender_id)
+    msg = await event.respond(text, buttons=buttons)
+    if not msg or not hasattr(msg, 'edit'):
+        return
+    key = (runtime.bot_username, event.sender_id)
+    old = _download_views.get(key)
+    if old and not old.done():
+        old.cancel()
+    async def watch():
+        from telethon.errors import MessageNotModifiedError
+        try:
+            for _ in range(120):  # reopen after ten minutes; no immortal UI tasks
+                await asyncio.sleep(5)
+                if not access.is_admin(event.sender_id):
+                    return
+                text, buttons = downloads_card(event.sender_id)
+                try:
+                    await asyncio.wait_for(msg.edit(text, buttons=buttons), timeout=8)
+                except MessageNotModifiedError:
+                    pass
+                except Exception:
+                    return
+        finally:
+            if _download_views.get(key) is asyncio.current_task():
+                _download_views.pop(key, None)
+    _download_views[key] = runtime.spawn(watch())
+
+
+@runtime.bot.on(events.NewMessage(pattern=r'^/downloads(?:@\w+)?$',
+                                  func=lambda e: e.is_private and not e.out))
+async def downloads_command(event):
+    await show_downloads(event)
+    raise events.StopPropagation
+
+
+@route('downloads')
+async def downloads_panel(event, rest):
+    if not access.is_admin(event.sender_id):
+        await event.answer('শুধু অ্যাডমিনের জন্য', alert=True)
+        return
+    await event.answer()
+    await show_downloads(event)

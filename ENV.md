@@ -269,3 +269,9 @@ Public page-এ কোনো management/admin link দেখানো হয় 
 ### Restricted download
 
 বটে `/restricted on` থেকে তৈরি admin-owned channel-এর registry ও post queue ডেটাবেজে থাকে; token/session নতুন করে দেওয়া লাগে না। কপি পাঠাতে ওই মালিকের user session-ই ব্যবহার হয়। এই আলাদা channel-এর forwarding enabled; সাধারণ store/source protection পরিবর্তন হয় না। `/restricted off` ও `/restricted retry` চালু/বন্ধ এবং ব্যর্থ post-এর checkpoint-aware retry দেয়।
+
+### Transfer progress / auto-start diagnosis
+
+`/downloads` এবং বটের **Download / Upload লাইভ** বাটনে stage, byte progress, MiB/s, phase ETA এবং target store-cache channel দেখা যায়। Queued মানেই চলমান download নয়; session, retry timer, FloodWait, worker heartbeat ও lease-এর কারণ আলাদা দেখায়। চলমান বটগুলোর transfer monitor shared lease ব্যবহার করে—মূল বট বন্ধ থাকলেও অন্য সংযুক্ত বট কাজ নিতে পারে। পুরোনো scan-এর missing job backfill হয়; Pause/Stop স্বয়ংক্রিয়ভাবে তুলে দেয় না।
+
+`transfer_progress` SQLite টেবিল পুরো backup-এ থাকে। Byte callback writes প্রায় প্রতি সেকেন্ডে throttled; Telegram progress screen প্রায় ৫ সেকেন্ডে আপডেট। ETA বর্তমান phase-এর আনুমানিক হিসাব, Telegram throttle/নেটওয়ার্কে বদলাতে পারে।

@@ -57,6 +57,7 @@ def admin_panel(admin_id: int, active_store_name: str | None, session_ok: bool,
         Button.inline("👁 User view", "adm:prev"),
         Button.inline("🆘 Help", "adm:help"),
     ])
+    rows.append([Button.inline("📥 Download / Upload লাইভ", "downloads")])
     rows.append([Button.inline("📥 Restricted download", "rdl:home")])
     return rows
 

@@ -103,7 +103,7 @@ class TransferClient:
         self.paths = []
         self.sent = []
         self.fail, self.cancel = fail, cancel
-    async def download_media(self, message, file=None, thumb=None):
+    async def download_media(self, message, file=None, thumb=None, progress_callback=None):
         self.paths.append(file)
         Path(file).write_bytes(b'x' * (10 if thumb is not None else message.file.size))
         return file

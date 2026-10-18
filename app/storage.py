@@ -21,6 +21,14 @@ from app.logger import log
 from app.utils import slugify, unique_keep_order
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS transfer_progress (
+    scope TEXT NOT NULL, file_key INTEGER NOT NULL, owner_id INTEGER NOT NULL,
+    name TEXT DEFAULT '', stage TEXT DEFAULT 'waiting', current INTEGER DEFAULT 0,
+    total INTEGER DEFAULT 0, started_at REAL DEFAULT 0, updated_at REAL DEFAULT 0,
+    detail TEXT DEFAULT '', PRIMARY KEY(scope,file_key)
+);
+
+CREATE INDEX IF NOT EXISTS transfer_progress_owner ON transfer_progress(owner_id,updated_at DESC);
 CREATE TABLE IF NOT EXISTS restricted_channels (
     chat_id INTEGER PRIMARY KEY, admin_id INTEGER NOT NULL UNIQUE,
     link TEXT DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1
