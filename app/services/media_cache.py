@@ -31,11 +31,12 @@ import asyncio
 import os
 import tempfile
 
+from telethon import utils
 from telethon.errors import FloodWaitError
 
 from app import runtime
 from app.logger import log
-from app.services import settings
+from app.services import peers, settings
 from app.services.telegram import safe_call
 from app.services.textclean import clean_text
 from app.storage import db
@@ -154,7 +155,12 @@ def _is_entity_error(exc: Exception) -> bool:
 
 async def _load_dialogs(client, force: bool = False) -> bool:
     """A fresh StringSession knows no channels at all ("Could not find the input
-    entity…"). Reading the dialog list teaches it every chat the account is in."""
+    entity…"). Reading the dialog list teaches it every chat the account is in.
+
+    ``limit=None`` matters: the default stops at 100 dialogs, so an account that is
+    in more chats than that never learns the cache channel — that *is* the
+    “Could not find the input entity for PeerChannel” in the logs.
+    """
     import time
     key = id(client)
     if not force and time.time() - _dialogs_at.get(key, 0) < 300:
@@ -164,33 +170,104 @@ async def _load_dialogs(client, force: bool = False) -> bool:
             return False                       # bots cannot list dialogs
     except Exception:
         pass
-    _dialogs_at[key] = time.time()
     try:
-        await client.get_dialogs()
-        log.info("userbot dialogs loaded (entity cache refreshed)")
-        return True
+        dialogs = await client.get_dialogs(limit=None)
     except Exception as exc:
         log.debug("could not load dialogs: %s", exc)
         return False
+    _dialogs_at[key] = time.time()
+    learned = 0
+    for dialog in dialogs or []:
+        entity = getattr(dialog, "entity", None)
+        if entity is None:
+            continue
+        try:
+            peer_id = int(utils.get_peer_id(entity))
+        except Exception:
+            continue
+        if peer_id < 0:
+            peers.remember_chat(peer_id, getattr(entity, "access_hash", None),
+                                getattr(entity, "title", None),
+                                getattr(entity, "username", None),
+                                "channel" if peers.is_channel_id(peer_id) else "chat")
+            learned += 1
+    log.info("userbot dialogs loaded (%s chats remembered)", learned)
+    return True
 
 
 async def _resolve_peer(client, peer):
-    """Make sure `client` knows the channel (a fresh StringSession has no cache)."""
+    """Make sure `client` knows the channel (a fresh StringSession has no cache).
+
+    Three steps, cheapest first: our own SQLite-backed ``InputPeerChannel`` → the
+    session's own cache → a full dialog walk. Every success is remembered, so the
+    next restart needs none of it.
+    """
+    cached = peers.chat_entity(peer) if isinstance(peer, (int, str)) and str(peer).lstrip("-").isdigit() else None
+    if cached is not None:
+        try:
+            return cached
+        except Exception:                      # pragma: no cover - defensive
+            pass
     try:
-        return await client.get_input_entity(peer)
+        entity = await client.get_input_entity(peer)
     except Exception:
         await _load_dialogs(client, force=True)
-        return await client.get_input_entity(peer)
+        try:
+            entity = await client.get_input_entity(peer)
+        except Exception:
+            await _note_channel_problem(peer)
+            raise
+    _remember_entity(entity)
+    return entity
 
 
-async def _create_cache_channel(client, title: str, about: str):
+def _remember_entity(entity) -> None:
+    """Store the (id, access_hash) of whatever Telegram just handed us."""
+    if entity is None:
+        return
+    try:
+        peer_id = int(utils.get_peer_id(entity))
+    except Exception:
+        return
+    if peer_id < 0:
+        peers.remember_chat(peer_id, getattr(entity, "access_hash", None),
+                            getattr(entity, "title", None),
+                            getattr(entity, "username", None),
+                            "channel" if peers.is_channel_id(peer_id) else "chat")
+
+
+#: One sentence the panel, the bot and the log all reuse — the cure is always this.
+_CHANNEL_FIX = ("ঠিক করার উপায়: বটে <code>/storageset probe</code> (অথবা <code>/storageset "
+                "@channelname</code>) দিন, ওয়েবসাইটের 📡 Channels পেজে “♻️ রিসেট” চাপুন, "
+                "নাহলে <code>/storageset auto</code> দিয়ে প্রতি স্টোরের আলাদা চ্যানেলে "
+                "ফিরে যান — সেশন নিজেই নতুন চ্যানেল বানিয়ে বটকে অ্যাডমিন করে দেবে।")
+
+
+async def _note_channel_problem(peer) -> None:
+    """Turn “Could not find the input entity for PeerChannel(…)” into a to-do list."""
+    from app.services import settings as settings_service
+    text = (f"ক্যাশ চ্যানেল ({peer}) খুলতে পারছে না — Telegram অ্যাক্সেস হ্যাশ জানে না। "
+            + _CHANNEL_FIX.replace("<code>", "").replace("</code>", ""))
+    log.warning("storage channel unreachable: %s", text)
+    try:
+        settings_service.set("STORAGE_CHANNEL_WARNING", text[:400])
+    except Exception:
+        pass
+
+
+async def _create_cache_channel(client, title: str, about: str, remember: bool = False):
     """Create a private channel with the owner's session and put the bot in it as admin."""
-    from telethon import functions, utils
+    from telethon import functions
     try:
         result = await client(functions.channels.CreateChannelRequest(
             title=title[:120], about=about[:200], broadcast=True, megagroup=False))
         channel = result.chats[0]
         peer_id = utils.get_peer_id(channel)
+        if remember:
+            # A brand-new channel: cache the pair right away, so a restart (or a
+            # wiped session) can still open it without walking every dialog.
+            peers.remember_chat(peer_id, getattr(channel, "access_hash", None),
+                                getattr(channel, "title", None), None)
         if runtime.bot_username:
             await client.edit_admin(channel, runtime.bot_username, is_admin=True,
                                     post_messages=True, edit_messages=True,
@@ -241,10 +318,64 @@ async def store_cache_peer(client, store: dict | None):
             return known
         peer_id = await _create_cache_channel(
             client, f"{str(store.get('name') or 'Store')[:80]} - media",
-            f"Auto-created for the store '{store.get('name')}'. Videos live here once. Do not delete.")
+            f"Auto-created for the store '{store.get('name')}'. Videos live here once. Do not delete.",
+            remember=True)
         if peer_id:
             db.set_meta(key, str(peer_id))
         return peer_id
+
+
+async def provision_store(store_id: int) -> dict:
+    """Give a brand-new store its own channel(s) without anyone asking.
+
+    The media cache is one private channel **per store** (`store_cache_peer`), so a
+    store's videos never travel through another store's chat. When
+    `AUTO_STORE_PUBLISH_CHANNEL` is on, a public publishing channel is created too —
+    the same one the store page's “📣 পাবলিশ চ্যানেল” button makes by hand.
+
+    Runs in the background after a store is created; every failure is only logged,
+    because a store must never fail to exist because Telegram was busy.
+    """
+    from app.storage import db as _db
+    store = _db.store(int(store_id))
+    if store is None:
+        return {"ok": False, "error": "স্টোর নেই"}
+    client = None
+    try:
+        preferred = int(store.get("admin_id") or 0)
+        client = runtime.user_clients.get(preferred) or next(iter(runtime.user_clients.values()), None)
+    except Exception:
+        client = None
+    if client is None:
+        log.debug("store %s: no user session yet — channels will be created on first use", store_id)
+        return {"ok": False, "error": "সেশন নেই"}
+
+    out: dict = {"ok": True, "cache": None, "publish": None}
+    if not settings.get_str("STORAGE_CHANNEL"):
+        try:
+            out["cache"] = await store_cache_peer(client, store)
+        except Exception as exc:
+            log.warning("store %s: cache channel failed: %s", store_id, exc)
+    if settings.get_bool("AUTO_STORE_PUBLISH_CHANNEL", False) and not store.get("publish_channel_id"):
+        try:
+            from app.services import channels
+            result = await channels.create_store_channel(int(store_id), title=store["name"])
+            out["publish"] = result.get("channel_id")
+            if not result.get("ok"):
+                log.warning("store %s: publish channel failed: %s", store_id,
+                            result.get("error"))
+        except Exception as exc:
+            log.warning("store %s: publish channel failed: %s", store_id, exc)
+    log.info("store %s provisioned: cache=%s publish=%s", store_id, out["cache"], out["publish"])
+    return out
+
+
+def provision_store_later(store_id: int) -> None:
+    """Fire-and-forget version for the store-creation flows."""
+    try:
+        runtime.spawn(provision_store(int(store_id)))
+    except Exception as exc:                       # no event loop (tests) — fine
+        log.debug("could not schedule store provisioning: %s", exc)
 
 
 async def poke_storage_channel(client) -> None:
@@ -420,7 +551,18 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool)
         peer = await _resolve_peer(client, peer)
     except Exception as exc:
         _note(file_row["id"], f"ইউজারবট ক্যাশ চ্যানেল খুলতে পারছে না ({str(exc)[:90]})")
-        return file_row
+        # Self-healing: the configured channel is unreachable *and* this store may
+        # have its own cache channel — try that before giving up on the file.
+        if store is not None and settings.get_bool("PER_STORE_CHANNEL", True):
+            try:
+                fallback = await store_cache_peer(client, store)
+                if fallback and fallback != peer:
+                    peer = await _resolve_peer(client, fallback)
+                    log.info("cache channel switched to the store channel %s", peer)
+            except Exception as second:
+                log.debug("store cache channel also unreachable: %s", second)
+        else:
+            return file_row
 
     source = await _media_from(client, int(file_row["chat_id"]), int(file_row["msg_id"]))
     if source is None:
@@ -442,6 +584,7 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool)
                                  what="mirror_copy", retries=1)
         if copied is not None and getattr(copied, "media", None):
             _problems.pop(int(file_row["id"]), None)
+            peers.remember_from_message(copied)
             db.set_mirror(file_row["id"], _mirror_chat_id(copied, peer), int(copied.id))
             log.info("mirrored file %s → %s/%s (copy)", file_row["id"],
                      _mirror_chat_id(copied, peer), copied.id)
@@ -458,6 +601,13 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool)
         if not await _download(client, source, tmp.name, size or None):
             _note(file_row["id"], "ভিডিও ডাউনলোড করা যায়নি (নেটওয়ার্ক/ফাইল সমস্যা)")
             return file_row
+        # Keep the bytes we just downloaded: the website player can then serve this
+        # file instantly (and even while Telegram is unreachable) — see store_bytes.
+        try:
+            with open(tmp.name, "rb") as handle:
+                store_bytes(file_row, handle.read())
+        except OSError as exc:
+            log.debug("caching the downloaded mirror failed: %s", exc)
         sent = await safe_call(
             client.send_file, peer, tmp.name,
             caption=clean_text(file_row.get("name") or "")[:200],
@@ -467,6 +617,7 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool)
         )
         if sent is not None and getattr(sent, "media", None):
             _problems.pop(int(file_row["id"]), None)
+            peers.remember_from_message(sent)
             db.set_mirror(file_row["id"], _mirror_chat_id(sent, peer), int(sent.id))
             db.set_file_bytes(file_row["id"], os.path.getsize(tmp.name))
             log.info("mirrored file %s → %s/%s (re-upload, %.1f MB)", file_row["id"],
@@ -558,6 +709,246 @@ async def copy_between_chats(source_chat: int, msg_id: int, target_chat: int,
     except Exception as exc:
         log.debug("copy_between_chats failed: %s", exc)
         return None
+
+
+# ---------------------------------------------------------------- web byte cache
+# Why this exists
+#   The public site plays media straight from Telegram. When the mirror is not
+#   ready yet — or the owner's userbot session is offline — the browser gets a
+#   404, the player shows “চালানো যাচ্ছে না” and jumps to the next slide. That is
+#   exactly the “মিডিয়া চলতেছে না” the owner reported.
+#
+#   The fix: any file the bot *has* downloaded for a store click (the mirror
+#   re-upload path) is also kept on disk, small and ready. The website then
+#   serves it instantly, with Range support, even with Telegram unreachable —
+#   and the first visitor never waits for a mirror that is still being built.
+#
+#   Only `MEDIA_CACHE_MAX_MB` (default 64 MB) per file is kept; bigger videos are
+#   streamed from Telegram as before, and a full cache is pruned oldest-first.
+def bytes_dir() -> "Path":
+    from pathlib import Path
+    return Path(os.getenv("MEDIA_CACHE_DIR", "media_cache"))
+
+
+def _max_cache_bytes() -> int:
+    mb = settings.get_int("MEDIA_CACHE_MAX_MB", 64) or 64
+    return max(1, mb) * 1024 * 1024
+
+
+def _total_cache_bytes() -> int:
+    budget = (settings.get_int("MEDIA_CACHE_TOTAL_MB", 1024) or 1024) * 1024 * 1024
+    return max(64 * 1024 * 1024, budget)
+
+
+def cache_key(file_row: dict) -> str:
+    """A stable name for one media item — a store file *or* a hand-picked pin."""
+    if not file_row:
+        return ""
+    file_id = int(file_row.get("id") or 0)
+    if file_id:
+        return f"f{file_id}"
+    pin_id = int(file_row.get("pin_id") or 0)
+    if pin_id:
+        return f"p{pin_id}"
+    chat = int(file_row.get("chat_id") or 0)
+    msg = int(file_row.get("msg_id") or 0)
+    return f"c{chat}_{msg}" if chat and msg else ""
+
+
+def _bytes_path(file_row, suffix: str = ".bin"):
+    key = file_row if isinstance(file_row, str) else cache_key(file_row)
+    if not key:
+        raise ValueError("no cache key")
+    return bytes_dir() / f"{key}{suffix}"
+
+
+def store_bytes(file_row: dict, payload: bytes, thumb: bytes = b"") -> bool:
+    """Remember what we already downloaded, so the website can play it at once."""
+    try:
+        key = cache_key(file_row)
+        if not key or not payload:
+            return False
+        if len(payload) > _max_cache_bytes():
+            return False
+        directory = bytes_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        _bytes_path(key).write_bytes(payload)
+        if thumb:
+            _bytes_path(key, ".jpg").write_bytes(thumb[:1024 * 512])
+        db.set_meta(f"webcache:{key}", str(len(payload)))
+        _prune_cache()
+        _cache_problems.pop(key, None)
+        log.info("cached %s (%.2f MB) for the website player", key,
+                 len(payload) / 1048576)
+        return True
+    except OSError as exc:
+        log.debug("byte cache write failed: %s", exc)
+        return False
+
+
+def _prune_cache() -> int:
+    """Keep the folder under the budget — oldest first, never a file in use."""
+    budget = _total_cache_bytes()
+    entries = []
+    total = 0
+    try:
+        for path in bytes_dir().glob("*.bin"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            entries.append((stat.st_mtime, stat.st_size, path))
+            total += stat.st_size
+    except OSError:
+        return 0
+    if total <= budget:
+        return 0
+    removed = 0
+    for _mtime, size, path in sorted(entries):        # oldest first
+        if total <= budget:
+            break
+        try:
+            path.unlink()
+            _bytes_path(path.stem, ".jpg").unlink(missing_ok=True)
+            db.set_meta(f"webcache:{path.stem}", "")
+            total -= size
+            removed += 1
+        except (OSError, ValueError):
+            continue
+    if removed:
+        log.info("pruned %s cached clip(s) to stay inside the cache budget", removed)
+    return removed
+
+
+def local_bytes(file_row: dict) -> bytes | None:
+    """The whole cached file, or None when it is not cached (yet)."""
+    try:
+        path = _bytes_path(file_row)
+        if path.is_file():
+            return path.read_bytes()
+    except (OSError, TypeError, ValueError):
+        return None
+    return None
+
+
+def local_size(file_row: dict) -> int:
+    try:
+        path = _bytes_path(file_row)
+        return path.stat().st_size if path.is_file() else 0
+    except (OSError, TypeError, ValueError):
+        return 0
+
+
+def local_thumb(file_row: dict) -> bytes | None:
+    try:
+        path = _bytes_path(file_row, ".jpg")
+        return path.read_bytes() if path.is_file() else None
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+async def iter_bytes(file_row: dict, start: int, end: int):
+    """Stream a byte range of a cached clip (max 1 MB per read)."""
+    path = _bytes_path(file_row)
+    step = 1024 * 1024
+    with open(path, "rb") as handle:
+        handle.seek(int(start))
+        remaining = max(0, int(end) - int(start) + 1)
+        while remaining > 0:
+            chunk = handle.read(min(step, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+def forget_bytes(file_row) -> bool:
+    """Drop one cached clip (the panel's 🗑 button)."""
+    removed = False
+    try:
+        key = cache_key(file_row) if isinstance(file_row, dict) else str(file_row)
+    except Exception:
+        return False
+    for suffix in (".bin", ".jpg"):
+        try:
+            _bytes_path(key, suffix).unlink()
+            removed = True
+        except OSError:
+            continue
+    db.set_meta(f"webcache:{key}", "")
+    return removed
+
+
+def cached_count() -> int:
+    try:
+        return sum(1 for _ in bytes_dir().glob("*.bin"))
+    except OSError:
+        return 0
+
+
+_cache_problems: dict[str, str] = {}
+
+
+def cache_problem(file_row) -> str:
+    """Why the last on-demand fetch for this item failed ('' = none)."""
+    try:
+        key = cache_key(file_row) if isinstance(file_row, dict) else str(file_row)
+    except Exception:
+        return ""
+    return _cache_problems.get(key, "")
+
+
+async def fetch_now(file_row: dict, store: dict | None = None,
+                    timeout: float = 12.0) -> bytes | None:
+    """Download a file the bot can read and cache it — right now, on demand.
+
+    Called by the website when a visitor presses “চালান” on a clip that has no
+    cache yet: the player waits for real bytes instead of showing “লোড হলো না”.
+    """
+    if not file_row:
+        return None
+    from app.runtime import bot
+    cached = local_bytes(file_row)
+    if cached:
+        return cached
+    try:
+        message = await _media_from(bot, int(file_row["chat_id"]), int(file_row["msg_id"]))
+    except Exception as exc:
+        message = None
+        log.debug("on-demand fetch: %s", exc)
+    if message is None:
+        try:
+            client = await live_session(file_row, store)
+            if client is not None:
+                message = await _media_from(client, int(file_row["chat_id"]),
+                                            int(file_row["msg_id"]))
+        except Exception as exc:
+            log.debug("on-demand fetch via the session: %s", exc)
+    if message is None:
+        _cache_problems[cache_key(file_row)] = "মিডিয়া এখন পড়া যাচ্ছে না"
+        return None
+    size = int(getattr(getattr(message, "file", None), "size", 0) or 0)
+    if size and size > _max_cache_bytes():
+        _cache_problems[cache_key(file_row)] = (
+            f"ফাইলটা {size // (1024 * 1024)} MB — স্বয়ংক্রিয় ক্যাশের সীমার চেয়ে বড়")
+        return None
+    try:
+        payload = await asyncio.wait_for(
+            bot.download_media(message, file=bytes), timeout=timeout)
+    except Exception as exc:
+        _cache_problems[cache_key(file_row)] = f"ডাউনলোড ব্যর্থ ({str(exc)[:60]})"
+        return None
+    if not payload:
+        _cache_problems[cache_key(file_row)] = "খালি ফাইল এসেছে"
+        return None
+    payload = bytes(payload)
+    thumb = b""
+    try:
+        thumb = await bot.download_media(message, file=bytes, thumb=-1) or b""
+    except Exception:
+        thumb = b""
+    store_bytes(file_row, payload, bytes(thumb) if thumb else b"")
+    return payload
 
 
 def stats() -> dict:

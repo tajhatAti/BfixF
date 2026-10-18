@@ -11,6 +11,7 @@ from app import config as cfg, runtime
 from app.services import channels, forcejoin, settings
 from app.storage import db
 from app.utils import esc, fmt_ts
+from web import adminui as ui
 
 
 def _start(ts) -> str:
@@ -23,6 +24,7 @@ def _pill(text: str) -> str:
 
 # ------------------------------------------------------------------- channels
 def channels_body(flash: str = "", warn: str = "") -> str:
+    """📡 Every channel the bot talks to: force-join gates and per-store caches."""
     rows = []
     for row in db.join_channels():
         scope = "🌍 সব স্টোরে" if row.get("store_id") is None else f"🏪 স্টোর #{row['store_id']}"
@@ -63,7 +65,51 @@ def channels_body(flash: str = "", warn: str = "") -> str:
     <table><tr><th>চ্যানেল</th><th>ধরন</th><th>কার জন্য</th><th>ID</th><th>চালু</th><th></th></tr>
     {''.join(rows) or "<tr><td colspan=6 class='muted'>এখনো কোনো চ্যানেল যোগ করা হয়নি</td></tr>"}</table>
     <p class="row"><a class="btn" href="/admin/channels/compose">✍️ চ্যানেলে পোস্ট করুন</a>
-       <a class="btn grey" href="/admin/channels?refresh=1">🔄 আবার রিজলভ করুন</a></p>"""
+       <a class="btn grey" href="/admin/channels?refresh=1">🔄 আবার রিজলভ করুন</a></p>
+    {store_channels_card()}"""
+
+
+def store_channels_card() -> str:
+    """📡 প্রতি স্টোরের নিজের চ্যানেল — এক নজরে, এক ক্লিকে তৈরি।
+
+    Channel per store is what keeps one store's audience out of another's feed: the
+    cache channel, the publishing channel and the force-join gate can all be scoped to
+    a single store from here.
+    """
+    rows = []
+    for store in db.all_stores():
+        cache_key = db.get_meta(f"store_cache_channel:{store['id']}", "")
+        publish = store.get("publish_channel_id") or 0
+        known = db.chat_peer(int(cache_key)) if str(cache_key).lstrip("-").isdigit() else None
+        cache_cell = ("✅ <code>%s</code>" % esc(str(cache_key))) if cache_key else "⏳ তৈরি হয়নি"
+        if cache_key and not (known and known.get("access_hash")):
+            cache_cell += " <span class='pill'>হ্যাশ হয়নি</span>"
+        link = (f"<a class='btn grey' href='{esc(store.get('publish_channel_link'))}' "
+                f"target='_blank'>🔗</a>") if store.get("publish_channel_link") else ""
+        rows.append(
+            f"<tr><td>#{store['id']} · <b>{esc(store['name'])}</b></td>"
+            f"<td>{cache_cell}</td>"
+            f"<td>{('✅ <code>%s</code> %s' % (publish, link)) if publish else '⏳ তৈরি হয়নি'}</td>"
+            f"<td>{'✅ চালু' if store.get('auto_post_enabled') else '—'}</td>"
+            f"<td><div class='row'>"
+            f"<form method=post action='/admin/channels/store/{store['id']}/cache'>"
+            f"<button class='grey'>🎞 ক্যাশ চ্যানেল</button></form>"
+            f"<form method=post action='/admin/stores/{store['id']}/channel/create'>"
+            f"<button class='grey'>📣 পাবলিশ চ্যানেল</button></form>"
+            f"<form method=post action='/admin/channels/store/{store['id']}/cache/reset'>"
+            f"<button class='bad'>♻️ রিসেট</button></form>"
+            f"</div></td></tr>")
+    return f"""
+    <div class="page-heading"><div><p class="eyebrow">PER STORE</p>
+      <h2>🏪 প্রতি স্টোরের আলাদা চ্যানেল</h2></div></div>
+    <p class="muted">প্রতিটা স্টোরের ভিডিও আলাদা প্রাইভেট চ্যানেলে ক্যাশ হয় — এক স্টোরের
+    ভিডিও অন্য স্টোরের ইউজারের কাছে যায় না। চ্যানেলগুলো ইউজারবট নিজেই বানায় আর
+    বটকে অ্যাডমিন করে দেয়; তাই এখানে সাধারণত হাত দিতে হয় না। যদি লগে
+    <code>Could not find the input entity for PeerChannel</code> আসে, ♻️ রিসেট চেপে
+    আবার বানিয়ে নিন।</p>
+    <table><tr><th>স্টোর</th><th>ক্যাশ চ্যানেল</th><th>পাবলিশ চ্যানেল</th><th>অটো-পোস্ট</th><th></th></tr>
+    {''.join(rows) or "<tr><td colspan=5 class='muted'>এখনো কোনো স্টোর নেই</td></tr>"}</table>
+    """
 
 
 def compose_body(composer: dict, store_id: int | None, flash: str = "", warn: str = "") -> str:
@@ -140,6 +186,13 @@ def analytics_body(days: int = 14) -> str:
         f"<td>{db.unique_viewers(f['id'])}</td><td>{f['views']}</td>"
         f"<td><a class='btn grey' href='/admin/analytics/file/{f['id']}'>কে দেখেছে</a></td></tr>"
         for f in top_files)
+    conversion = db.conversion_rate(days)
+    dead = db.dead_files(days=days)
+    dead_rows = "".join(
+        f"<tr><td>#{d['id']} · {esc(d['name'])}</td><td>{esc(d.get('store_name') or '')}</td>"
+        f"<td>{esc(d.get('kind') or '')}</td><td>{_start(d.get('created_at'))}</td>"
+        f"<td><a class='btn grey' href='/admin/analytics/file/{d['id']}'>বিস্তারিত</a></td></tr>"
+        for d in dead[:20])
     event_rows = "".join(
         f"<tr><td>{esc(fmt_ts(e['ts'], '%d %b %H:%M'))}</td>"
         f"<td>{_user_link(e.get('user_id'), e.get('user_name'))}</td>"
@@ -147,14 +200,32 @@ def analytics_body(days: int = 14) -> str:
         f"<td>{esc(e.get('file_name') or '—')}</td><td>{esc((e.get('detail') or '')[:60])}</td></tr>"
         for e in db.events(limit=60))
 
-    return f"""<h3>📊 অ্যানালিটিক্স</h3>
+    return ui.page_head(
+        "অ্যানালিটিক্স",
+        f"শেষ {days} দিনের ছবি — কে এসেছে, কী দেখেছে, কী কিনেছে। "
+        "সংখ্যাগুলো লাইভ ডেটাবেস থেকে আসে।",
+        eyebrow="ANALYTICS",
+        actions='<div class="row">'
+                + "".join(f'<a class="btn {"grey" if d != days else ""}" '
+                          f'href="/admin/analytics?days={d}">{d} দিন</a>'
+                          for d in (7, 14, 30, 90))
+                + f'<a class="btn grey" href="/admin/download">⇩ এক্সপোর্ট</a></div>'
+    ) + f"""
     <div class="grid">
       {_card("ইউজার", users)}{_card("ফাইল", files)}{_card("ক্যাশড", mirrored)}
       {_card("লিংক", links)}{_card("স্টোর", len(stores))}
       {_card("ভিডিও পাঠানো", counts.get("deliver", 0))}
       {_card("স্টোর ওপেন", counts.get("open_store", 0))}
       {_card("পেমেন্ট শুরু", counts.get("pay_start", 0))}
+      {_card("কনভার্শন (ফ্রি → পেইড)", f"{conversion['rate']:.1f}%")}
     </div>
+    <p class="muted">শেষ {days} দিনে {conversion['came']} জন এসেছে, তার মধ্যে
+       {conversion['paid']} জন কিনেছে — কনভার্শন {conversion['rate']:.1f}%।</p>
+    <h4>🥀 ডেড ফাইল — কেউ দেখেইনি ({len(dead)}টি, শেষ {days} দিন)</h4>
+    <p class="muted">শূন্য ভিউ, শূন্য ডেলিভারি — হয়তো নাম/থাম্বনেইল বদলানো দরকার,
+       নাহয় ফাইলটা বাদ দেওয়া যায়।</p>
+    <table><tr><th>ফাইল</th><th>স্টোর</th><th>ধরন</th><th>যোগ হয়েছে</th><th></th></tr>
+    {dead_rows or "<tr><td colspan=5 class='muted'>বাহ! কোনো ডেড ফাইল নেই</td></tr>"}</table>
     <h4>📈 শেষ {days} দিন</h4>
     <table><tr><th>দিন</th><th>ইউজার</th><th>নতুন</th><th>ডেলিভারি</th><th>পেমেন্ট</th></tr>
     {day_rows or "<tr><td colspan=5 class='muted'>কোনো ডেটা নেই</td></tr>"}</table>
@@ -591,6 +662,43 @@ def logs_body(lines: list[str], level: str = "") -> str:
          font-size:12.5px;line-height:1.5">{joined or '<span class="muted">লগ খালি</span>'}</div>"""
 
 
+def audit_body(name: str = "", days: int = 30) -> str:
+    """🧾 who did what — read straight from the `events` table (see services/audit)."""
+    from app.services import audit
+
+    since = time.time() - max(1, min(days, 365)) * 86400
+    rows = audit.recent(limit=400, since=since, name=name)
+    tally = audit.counts(days=days)
+    chips = "".join(
+        f"<span class='pill'>{esc(audit.label(key))} <b>{count}</b></span>"
+        for key, count in tally[:8])
+    form = (f"<form class='row' method=get><input name=name value='{esc(name)}' "
+            "placeholder='settings · broadcast · user · store'>"
+            f"<input name=days type=number value='{int(days)}' min=1 max=365 "
+            "style='width:6rem'><button class='ok'>দেখুন</button></form>")
+    chips_html = (chips or '<span class="muted">এই সময়ে কোনো অ্যাকশন নেই</span>')
+    head = ui.page_head(
+        "অ্যাডমিন অ্যাকশন লগ",
+        "কে কখন কী করল — ব্রডকাস্ট, সেটিং, স্টোর, ব্যান, গ্রান্ট, চ্যানেল, স্ক্যান। "
+        "ডেটা আসে ডেটাবেসের events টেবিল থেকে, তাই পুরোনো রেকর্ডও হারায় না।",
+        eyebrow="AUDIT TRAIL",
+        actions='<a class="btn grey" href="/admin/logs">📜 সার্ভার লগ</a>')
+    return (
+        head + form
+        + f'<p class="row">{chips_html}'
+          f'<span class="pill plain">{len(rows)}টি এন্ট্রি (শেষ {int(days)} দিন)</span></p>'
+        + ui.table(["সময়", "অ্যাকশন", "কে", "স্টোর", "রেফ", "বিস্তারিত"],
+                   [[f"<span class='muted'>{fmt_ts(row.get('ts'), '%d %b %H:%M') if row.get('ts') else '—'}</span>",
+                     esc(audit.label(row.get("name"))),
+                     esc(str(row.get("user_name") or row.get("user_id") or "—")),
+                     esc(str(row.get("store_name") or "")),
+                     f'<code>{esc(str(row.get("ref") or ""))}</code>',
+                     f"<span class='muted'>{esc(str(row.get('detail') or '')[:130])}</span>"]
+                    for row in rows],
+                   empty_row="এই সময়ে কিছু হয়নি")
+    )
+
+
 def files_tools_body() -> str:
     dups = db.duplicate_files()
     dup_rows = "".join(
@@ -646,3 +754,316 @@ def users_tools_body(total: int = 0) -> str:
 
 def now_label() -> str:
     return fmt_ts(time.time(), "%d %b %Y %H:%M")
+
+
+# ------------------------------------------------------------------ visitors
+def _ago(seconds) -> str:
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return "—"
+    if seconds < 60:
+        return f"{max(1, seconds)} সেকেন্ড আগে"
+    if seconds < 3600:
+        return f"{seconds // 60} মিনিট আগে"
+    if seconds < 86400:
+        return f"{seconds // 3600} ঘণ্টা আগে"
+    return f"{seconds // 86400} দিন আগে"
+
+
+def _flag(code: str) -> str:
+    code = (code or "").strip().upper()
+    if len(code) == 2 and code.isalpha():
+        base = 0x1F1E6
+        return "".join(chr(base + (ord(ch) - ord("A"))) for ch in code)
+    return "🌐"
+
+
+def live_visitors_card(live: dict) -> str:
+    """“এখন কে অনলাইনে” — the part the owner refreshes all day long."""
+    rows = []
+    for row in live.get("rows") or []:
+        who = row.get("user_name") or row.get("user_username") or ""
+        if row.get("user_id"):
+            who = f"@{row['user_username']}" if row.get("user_username") else (who or f"#{row['user_id']}")
+        else:
+            who = "<span class='muted'>অজানা ভিজিটর</span>"
+        rows.append([
+            who,
+            f"<code>{esc(visitors_page(row.get('landing') or '/'))}</code>",
+            esc(row.get("device") or "—") + f" · {esc(row.get('browser') or '—')}",
+            f"{_flag(row.get('country'))} {esc(visitors_ip(row.get('ip')))}",
+            _ago(row.get("idle")),
+            f"<a class='btn grey' href='/admin/visitors/{esc(row.get('vid') or '')}'>🔎</a>",
+        ])
+    table = ui.table(["কে", "কোন পেজে", "ডিভাইস", "কোথা থেকে", "সর্বশেষ", ""], rows,
+                     empty_row="এখন কেউ সাইটে নেই")
+    return f"""
+    <div class="card" id="live-visitors">
+      <h3>🟢 এখন অনলাইনে <span class="pill">{live.get('online', 0)} জন</span></h3>
+      <p class="muted">শেষ {live.get('window_minutes', 5)} মিনিটে যারা সাইটে এসেছেন — পেজ বদলালেই
+         এখানে সাথে সাথে দেখা যাবে। নিজের ভিজিট আলাদা রাখা হয়, তাই সংখ্যাটা আসল ভিজিটরের।</p>
+      {table}
+    </div>"""
+
+
+def visitors_ip(value) -> str:
+    """Masked IP — the owner sees the network, never the whole address by default."""
+    from app.services import visitors as analytics
+    return analytics.masked_ip(str(value or ""))
+
+
+def visitors_page(path: str) -> str:
+    """`/s/cinema-house` → `cinema-house` — enough to recognise the page."""
+    text = str(path or "/")
+    return text if len(text) <= 42 else text[:39] + "…"
+
+
+def visitors_body(days: int = 14, tab: str = "live") -> str:
+    """📈 ভিজিটর — live visitors, today, top pages/media and the event stream."""
+    from app.services import visitors as analytics
+    data = analytics.overview(days=days)
+    live = data["live"]
+    today = data["today"]
+    totals = data["totals"]
+
+    tiles = ui.kpi_row(
+        ui.kpi("🟢 এখন অনলাইন", live.get("online", 0), sub="এই মুহূর্তে সাইটে",
+               dark=bool(live.get("online"))),
+        ui.kpi("👣 আজকের ভিজিটর", today.get("people", 0),
+               sub=f"{today.get('new_people', 0)} জন নতুন · {today.get('visits', 0)} ভিজিট"),
+        ui.kpi("📄 আজকের পেজভিউ", today.get("views", 0), sub=f"{today.get('events', 0)} কাজ"),
+        ui.kpi("🤖 বট ইউজার", data.get("bot_users", 0), sub="টেলিগ্রামে রেজিস্টার্ড"),
+        ui.kpi("🔗 লিংকড ভিজিটর", data.get("linked_users") and len(data["linked_users"]) or 0,
+               sub="বট ইউজার + ওয়েবসাইট"),
+    )
+
+    live_card = live_visitors_card(live)
+
+    # ---------------------------------------------------------------- today
+    start_of_day = time.strftime("%Y-%m-%d")
+    day_rows = []
+    for row in data.get("visits") or []:
+        start = time.strftime("%d %b %H:%M", time.localtime(float(row.get("started_at") or 0)))
+        if row.get("started_at") and time.strftime("%Y-%m-%d", time.localtime(
+                float(row['started_at']))) != start_of_day:
+            continue
+        who = row.get("user_name") or (f"@{row['user_username']}" if row.get("user_username")
+                                       else "<span class='muted'>অজানা</span>")
+        day_rows.append([
+            f"<a href='/admin/visitors/{esc(row.get('vid') or '')}'>{esc(str(row.get('vid') or ''))[:8]}…</a>",
+            who,
+            start,
+            f"{int(float(row.get('last_seen') or 0) - float(row.get('started_at') or 0))} সেকেন্ড",
+            str(row.get("pageviews") or 0),
+            esc(row.get("source") or "—"),
+            f"{_flag(row.get('country'))} {esc(row.get('device') or '')}",
+            f"<code>{esc(visitors_ip(row.get('ip')))}</code>",
+        ])
+    today_table = ui.table(["ভিজিট", "কে", "শুরু", "সময়", "পেজ", "সোর্স", "ডিভাইস",
+                            "আইপি (মাস্ক করা)"], day_rows,
+                           empty_row="আজ এখনো কেউ আসেনি")
+
+    # ------------------------------------------------------- days / chart
+    series = data.get("series") or []
+    peak = max([row["visitors"] for row in series] or [1]) or 1
+    chart = "".join(
+        f"<div class='bar' title='{row['day']}: {row['visitors']} ভিজিটর'>"
+        f"<i style='height:{max(4, int(row['visitors'] / peak * 100))}%'></i>"
+        f"<span>{row['day'][8:]}</span></div>" for row in series)
+    days_table = ui.table(
+        ["দিন", "ভিজিটর", "পেজভিউ", "কাজ"],
+        [[row["day"], row["visitors"], row["views"], row["events"]] for row in reversed(series)],
+        empty_row="এখনো কোনো ডেটা নেই")
+
+    top_pages = ui.table(["পেজ", "বার খোলা", "কতজন"],
+                         [[f"<code>{esc(row['path'])}</code>", row["hits"], row["people"]]
+                          for row in data.get("top_pages") or []],
+                         empty_row="কিছু নেই")
+    media_rows = []
+    for row in data.get("top_media") or []:
+        media_rows.append([
+            f"🎬 {esc(row.get('name') or '')}",
+            f"<span class='pill'>{esc(row.get('kind') or '')}</span>",
+            row.get("plays") or 0,
+            row.get("people") or 0,
+            f"<a class='btn grey' href='/admin/visitors/media/{int(row.get('file_id') or 0)}'>🔎 কারা দেখল</a>",
+        ])
+    top_media = ui.table(["মিডিয়া", "ধরন", "চালানো", "কতজন", ""], media_rows,
+                         empty_row="এখনো কেউ ভিডিও চালায়নি")
+    sources = ui.table(["সোর্স", "ভিজিটর"],
+                       [[esc(row["source"] or "—"), row["people"]]
+                        for row in data.get("top_sources") or []], empty_row="কিছু নেই")
+    countries = ui.table(["দেশ", "ভিজিটর"],
+                         [[f"{_flag(row['country'])} {esc(row['country'])}", row["people"]]
+                          for row in data.get("top_countries") or []],
+                         empty_row="দেশ শনাক্ত হয়নি")
+    devices = ui.table(["ডিভাইস", "ভিজিটর"],
+                       [[esc(row["device"] or "—"), row["people"]]
+                        for row in data.get("top_devices") or []], empty_row="কিছু নেই")
+    linked = ui.table(
+        ["বট ইউজার", "ভিজিটর আইডি", "সর্বশেষ", "কোথা থেকে", "ল্যান্ডিং"],
+        [[esc(row.get("user_name") or f"#{row.get('user_id')}"),
+          f"<a href='/admin/visitors/{esc(row.get('vid') or '')}'>{esc(str(row.get('vid') or ''))[:8]}…</a>",
+          _ago(time.time() - float(row.get("last_seen") or 0)),
+          esc(row.get("source") or "—"), f"<code>{esc(row.get('landing') or '')}</code>"]
+         for row in data.get("linked_users") or []],
+        empty_row="এখনো কোনো বট ইউজারকে শনাক্ত করা যায়নি")
+
+    events = ui.timeline([
+        (time.strftime("%d %b %H:%M", time.localtime(float(row.get("ts") or 0))),
+         f"{esc(analytics.EVENT_LABELS.get(row.get('name') or '', row.get('name') or ''))}"
+         f" · <span class='muted'>{esc(row.get('path') or '')} "
+         f"{esc(row.get('detail') or '')}</span>"
+         + (f" · <b>{esc(row.get('user_name') or '')}</b>" if row.get("user_name") else ""))
+        for row in data.get("events") or []]) or ui.empty("🕐", "এখনো কোনো কাজ রেকর্ড হয়নি")
+
+    tabs = ui.tabs([("🟢 লাইভ", "/admin/visitors"),
+                    ("📅 আজ", "/admin/visitors?tab=today"),
+                    ("🎬 পেজ ও মিডিয়া", "/admin/visitors?tab=content"),
+                    ("👥 কারা এসেছে", "/admin/visitors?tab=who"),
+                    ("📊 সব সময়", "/admin/visitors?tab=all")],
+                   active=("/admin/visitors" if tab == "live" else f"/admin/visitors?tab={tab}"))
+
+    if tab == "today":
+        middle = f'<div class="card"><h3>📅 আজকের ভিজিটর ({start_of_day})</h3>{today_table}</div>'
+    elif tab == "content":
+        middle = (f'<div class="card"><h3>📄 সবচেয়ে বেশি খোলা পেজ</h3>{top_pages}</div>'
+                  f'<div class="card"><h3>🎬 সবচেয়ে বেশি চলা মিডিয়া</h3>{top_media}</div>')
+    elif tab == "who":
+        middle = (f'<div class="card"><h3>👥 ব্যক্তিগত ভিজিটর</h3>{linked}</div>'
+                  f'<div class="card"><h3>📱 কোন ডিভাইস</h3>{devices}</div>'
+                  f'<div class="card"><h3>🌍 কোন দেশ থেকে</h3>{countries}</div>')
+    elif tab == "all":
+        middle = (f'<div class="card"><h3>📊 দিন অনুযায়ী</h3><div class="visitors-chart">{chart}</div>'
+                  f'{days_table}</div>'
+                  f'<div class="card"><h3>🔗 কোথা থেকে এসেছে</h3>{sources}</div>')
+    else:
+        middle = (live_card
+                  + f'<div class="card"><h3>📅 আজকের রেকর্ড</h3>{today_table}</div>'
+                  + f'<div class="card"><h3>🎬 এখন যা চলছে/চালানো হয়েছে</h3>{top_media}</div>')
+
+    return f"""
+    {tiles}
+    {tabs}
+    <p class="muted">সব সময় মোট <b>{totals.get('visits', 0)}</b> ভিজিট ·
+      <b>{totals.get('people', 0)}</b> জন ভিজিটর · <b>{totals.get('views', 0)}</b> পেজভিউ ·
+      <b>{totals.get('events', 0)}</b> কাজ
+      {('· শুরু ' + fmt_ts(totals.get('first_at')) if totals.get('first_at') else '')}
+      · <a href="/admin/visitors.csv">⬇ CSV</a> · <a href="/admin/visitors.json">🔄 লাইভ JSON</a></p>
+    {middle}
+    <div class="card"><h3>🕐 সাম্প্রতিক কাজ</h3>{events}</div>
+    <div class="card">
+      <h3>🧹 পুরোনো ডেটা</h3>
+      <p class="muted">৯০ দিনের পুরোনোটাই নিজে থেকে মুছে যায় (গোপনীয়তা + গতি দুটোর জন্যই)।</p>
+      <form method=post action="/admin/visitors/prune">
+        <label>কত দিন রাখবেন?</label>
+        <input name="days" type="number" value="90" min="1" max="3650">
+        <button class="btn grey">🧹 ছোট করে ফেলুন</button>
+      </form>
+    </div>"""
+
+
+# ---------------------------------------------------------------------- bots
+def bots_body(flash: str = "", warn: str = "") -> str:
+    """🤖 বটগুলো — several bots on one database, each in its own process."""
+    from app.services import botrunner
+    rows = botrunner.status()
+    table_rows = []
+    for row in rows:
+        bot_id = row.get("id") or 0
+        state = ("🟢 চলছে" if row.get("running") else "⚪️ বন্ধ") if not row.get("main") else "🟢 চলছে (মূল)"
+        controls = ""
+        if not row.get("main"):
+            controls = (
+                (f"<a class='btn grey' href='/admin/bots/{bot_id}/stop'>⏹ বন্ধ</a> "
+                 if row.get("running") else
+                 f"<a class='btn' href='/admin/bots/{bot_id}/start'>▶️ চালু</a> ")
+                + f"<a class='btn grey' href='/admin/bots/{bot_id}/restart'>🔄</a> "
+                  f"<a class='btn bad' href='/admin/bots/{bot_id}/delete'>🗑</a>")
+        table_rows.append([
+            f"{esc(row.get('label') or f'বট #{bot_id}')}"
+            + (f"<div class='muted'>@{esc(row.get('username') or '')}</div>"
+               if row.get("username") else ""),
+            state,
+            f"<code>{esc(row.get('masked') or botrunner.mask_token(row.get('token') or ''))}</code>",
+            f"<code>{row.get('admin_id') or '—'}</code>",
+            esc(str(row.get("last_error") or "")[:60]) or "—",
+            controls,
+        ])
+    table = ui.table(["বট", "অবস্থা", "টোকেন", "অ্যাডমিন", "সর্বশেষ সমস্যা", ""], table_rows,
+                     empty_row="এখনো কোনো বট যোগ করা হয়নি")
+    note = f'<div class="flash">{esc(flash)}</div>' if flash else ""
+    warnbox = f'<div class="warnbox">{esc(warn)}</div>' if warn else ""
+    return f"""{note}{warnbox}
+    <div class="card">
+      <h3>➕ নতুন বট যোগ করুন</h3>
+      <p class="muted">@BotFather-এ <code>/newbot</code> দিয়ে টোকেন নিন। টোকেনটা এখানে পেস্ট
+        করুন — অথবা <b>BotFather-এর মেসেজটা যেকোনো চালু বটে ফরওয়ার্ড করুন</b>, তখন কিছু লিখতেই
+        হবে না। নতুন বট একই ডেটাবেজ ব্যবহার করবে (একই ইউজার, স্টোর, অর্ডার), আর একটি বন্ধ হলেও
+        বাকিগুলো চলতেই থাকবে।</p>
+      <form method=post action="/admin/bots/add">
+        <label>বট টোকেন</label>
+        <input name="token" placeholder="1234567890:AAH…" required>
+        <label>নাম (ঐচ্ছিক)</label>
+        <input name="label" placeholder="যেমন: দ্বিতীয় বট">
+        <label>এই বটের অ্যাডমিন আইডি (ঐচ্ছিক — খালি রাখলে মূল অ্যাডমিন)</label>
+        <input name="admin_id" placeholder="123456789">
+        <label>API ID (ঐচ্ছিক — খালি রাখলে এখনকারটাই ব্যবহার হবে)</label>
+        <input name="api_id" placeholder="123456">
+        <label>টীকা (ঐচ্ছিক)</label>
+        <input name="note" placeholder="যেমন: ব্যাকআপ বট">
+        <button class="btn">➕ যোগ করুন</button>
+      </form>
+    </div>
+    <div class="card"><h3>🤖 সব বট</h3>{table}</div>
+    <div class="card">
+      <h3>ℹ️ কেন এভাবে?</h3>
+      <p class="muted">টেলিগ্রামে একই টোকেন একসাথে দুই জায়গা থেকে চালানো যায় না
+        (“Conflict: terminated by other getUpdates request”)। তাই প্রতিটি আলাদা বট আলাদা
+        ছোট প্রসেসে চলে — কিন্তু <b>ডেটাবেজ একটাই</b>, তাই ইউজার, স্টোর, অর্ডার, ব্রডকাস্ট
+        সবখানে একই থাকে। একটা বট ব্লক/লিমিটে পড়লেও অন্যগুলো সেবা দিতে থাকে।</p>
+    </div>"""
+
+
+def admins_body(flash: str = "", warn: str = "") -> str:
+    """👥 কারা এই প্যানেল ও বট চালাতে পারবে — the multi-admin card."""
+    from app.services import credentials
+    rows = credentials.admin_details()
+    table_rows = []
+    for row in rows:
+        controls = ("<span class='pill'>মালিক</span>" if row["owner"]
+                    else f"<a class='btn bad' href='/admin/admins/remove/{row['user_id']}'>🗑 সরান</a>")
+        table_rows.append([
+            f"<b>{esc(row['name'] or '—')}</b>"
+            + (f"<div class='muted'>@{esc(row['username'])}</div>" if row["username"] else ""),
+            f"<code>{row['user_id']}</code>",
+            "✅ সংযুক্ত" if row["has_session"] else "—",
+            (fmt_ts(row["seen"], "%d %b %H:%M") if row["seen"] else "—"),
+            controls,
+        ])
+    table = ui.table(["নাম", "টেলিগ্রাম আইডি", "ইউজারবট সেশন", "সর্বশেষ দেখা", ""], table_rows,
+                     empty_row="কোনো অ্যাডমিন নেই")
+    note = f'<div class="flash">{esc(flash)}</div>' if flash else ""
+    warnbox = f'<div class="warnbox">{esc(warn)}</div>' if warn else ""
+    return f"""{note}{warnbox}
+    <div class="card">
+      <h3>👥 অ্যাডমিন যোগ করুন</h3>
+      <p class="muted">যাকে যোগ করবেন সে টেলিগ্রামে আপনার বটে <code>/start</code> দিয়ে প্যানেলে
+        ঢুকতে পারবে — এবং বটের সব অ্যাডমিন কমান্ড (<code>/br</code>, <code>/backup</code>…) ব্যবহার
+        করতে পারবে। আইডি জানতে ওই ব্যক্তি <b>@userinfobot</b>-কে <code>/start</code> দিলে পাবেন।
+        যে ব্যক্তি আগে বটে <code>/start</code> দিয়েছেন তাঁর আইডি Picker-এও পাবেন।</p>
+      <form method=post action="/admin/admins/add">
+        <label>টেলিগ্রাম আইডি (শুধু সংখ্যা)</label>
+        <input name="user_id" placeholder="123456789" required>
+        <button class="btn">➕ যোগ করুন</button>
+      </form>
+    </div>
+    <div class="card"><h3>🛡 বর্তমান অ্যাডমিন</h3>{table}</div>
+    <div class="card">
+      <h3>🔑 টোকেন-সহ পুরো ইনস্টল</h3>
+      <p class="muted">বট টোকেন, API ID/হ্যাশ আর অ্যাডমিন তালিকা ডেটাবেজেই সেভ থাকে — একবার
+        দিলে আর কখনো দিতে হয় না, নতুন হোস্টে ব্যাকআপ ফিরিয়ে আনলেই সব ফিরে আসে। কে কী দেখতে
+        পাবে সেটা ব্যাকআপ ফাইলে থাকে, তাই ফাইলটা কারো সাথে শেয়ার করবেন না।</p>
+      <a class="btn grey" href="/admin/backup">🗄 ব্যাকআপ ও হোস্ট বদল</a>
+    </div>"""

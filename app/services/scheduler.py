@@ -107,6 +107,23 @@ async def backup_loop() -> None:
         await asyncio.sleep(600)
 
 
+async def analytics_loop() -> None:
+    """Once a day: prune old visitor records and keep the media cache tidy."""
+    from app.services import media_cache, visitors
+    while True:
+        try:
+            today = local_date_str()
+            if db.get_meta("last_analytics_prune") != today:
+                db.set_meta("last_analytics_prune", today)
+                report = visitors.prune(days=settings.get_int("VISITOR_KEEP_DAYS", 90) or 90)
+                if report.get("removed"):
+                    log.info("visitor analytics pruned: %s old rows", report["removed"])
+                media_cache._prune_cache()
+        except Exception as exc:
+            log.debug("analytics loop error: %s", exc)
+        await asyncio.sleep(3600)
+
+
 async def reminder_loop() -> None:
     """Once a day, nudge users whose premium access is about to end."""
     while True:
@@ -147,8 +164,8 @@ async def owner_report_loop() -> None:
                 hour = int(local_time_str()[:2])
                 if hour >= settings.get_int("OWNER_REPORT_HOUR", 21) \
                         and db.get_meta("owner_report_day") != today:
-                    db.set_meta("owner_report_day", today)
                     await send_owner_report()
+                    db.set_meta("owner_report_day", today)
         except Exception as exc:
             log.error("owner report error: %s", exc)
         await asyncio.sleep(1800)
@@ -192,12 +209,25 @@ async def send_owner_report(days: int = 1) -> str:
         lines.append("")
         lines.append("💡 আজ কেউ কিছু খোলেনি — নতুন ব্রডকাস্ট বা ডাইজেস্ট দেওয়ার ভালো সময়।")
     text = "\n".join(lines)
+    failures = []
+    today = local_date_str()
     for admin_id in cfg.ADMIN_IDS:
         try:
             await safe_call(bot.send_message, admin_id, text, what="owner_report",
                             retries=1, link_preview=False)
-        except Exception:
-            continue
+            if settings.get_bool("OWNER_REPORT_BACKUP", True):
+                marker = f"report_backup:{admin_id}"
+                if db.get_meta(marker) != today:
+                    from app.services import portable
+                    result = await portable.send_backup(admin_id, note="daily-report")
+                    if not result.get("sent"):
+                        raise RuntimeError("daily backup delivery failed")
+                    db.set_meta(marker, today)
+        except Exception as exc:
+            failures.append(admin_id)
+            log.warning("Report/backup to %s failed: %s", admin_id, exc)
+    if failures:
+        raise RuntimeError(f"Report/backup pending for {len(failures)} admin(s)")
     db.set_meta("owner_report_text", text[:4000])
     return text
 
@@ -322,8 +352,12 @@ async def digest_loop() -> None:
         await asyncio.sleep(600)
 
 
-async def run_digest(force: bool = False) -> dict:
-    """Queue the weekly digest campaigns. Returns a small report."""
+async def run_digest(force: bool = False, *, start: bool = True) -> dict:
+    """Queue the weekly digest campaigns. Returns a small report.
+
+    `start=False` only builds the drafts (the panel's “খসড়া বানান” button), so the
+    owner can look at them in the studio before anything is delivered.
+    """
     from app import runtime
     from app.services import broadcast
 
@@ -344,11 +378,11 @@ async def run_digest(force: bool = False) -> dict:
                 f"{len(fresh)} টি নতুন কনটেন্ট যোগ হয়েছে — নিচের বাটনে চাপ দিন।")
         campaign = broadcast.create_campaign(
             store["admin_id"], title=title, text=text, audience=audience,
-            files=[f["id"] for f in fresh], start=True)
+            files=[f["id"] for f in fresh], start=bool(start))
         queued.append({"store": store["name"], "campaign": campaign["id"],
                        "targets": len(targets), "files": len(fresh)})
         log.info("Digest queued for store %s → %s users", store["id"], len(targets))
-    if queued and runtime.bot_online():
+    if queued and start and runtime.bot_online():
         for item in queued:
             if not broadcast.is_running(item["campaign"]):
                 broadcast.start_campaign(item["campaign"])
@@ -367,6 +401,7 @@ def start_all() -> list[asyncio.Task]:
         spawn(mirror_loop()),
         spawn(digest_loop()),
         spawn(owner_report_loop()),
+        spawn(analytics_loop()),
     ]
     log.info("Started %s background workers", len(tasks))
     return tasks

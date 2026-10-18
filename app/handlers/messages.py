@@ -394,6 +394,8 @@ async def pending_input(event) -> None:
             return
         store = db.create_store(admin_id, name)
         db.set_active_store(admin_id, store["id"])
+        from app.services import media_cache
+        media_cache.provision_store_later(store["id"])      # its own channel, in background
         await answer(
             f"✅ Store <b>{esc(store['name'])}</b> created and set as active.\n"
             f"🔗 <code>https://t.me/{runtime.bot_username}?start=s{store['id']}</code>\n"

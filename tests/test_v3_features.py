@@ -962,7 +962,7 @@ def test_scheduler_starts_every_worker(clean):
 
     async def run():
         tasks = scheduler.start_all()
-        assert len(tasks) == 9
+        assert len(tasks) == 10
         assert all(isinstance(t, asyncio.Task) for t in tasks)
         for task in tasks:
             task.cancel()

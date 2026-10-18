@@ -60,8 +60,11 @@ runtime.bot_username = "test_bot"
 def stub_bot():
     """Import every handler module exactly once and hand back the stub client."""
     from importlib import import_module
-    for name in ("app.handlers.router", "app.handlers.guard", "app.handlers.br", "app.handlers.admin", "app.handlers.billing",
+    for name in ("app.handlers.router", "app.handlers.peers", "app.handlers.guard",
+                 "app.handlers.portable",
+                 "app.handlers.br", "app.handlers.reel", "app.handlers.admin", "app.handlers.billing",
                  "app.handlers.extras", "app.handlers.inline", "app.handlers.linkpanel", "app.handlers.manage",
-                 "app.handlers.messages", "app.handlers.panel_v3", "app.handlers.user"):
+                 "app.handlers.messages", "app.handlers.panel_v3", "app.handlers.bots",
+                 "app.handlers.user"):
         import_module(name)
     return runtime.get_client()

@@ -44,6 +44,10 @@ ADMIN_HELP = (
     "• 🗂 Manage Files — rename, delete or move files\n"
     "• 📊 Stats — users, views, top files\n"
     "• 💾 Backup — write a JSON snapshot right now\n"
+    "• 📣 /br — broadcast studio (media, text, buttons, audience, slow mode)\n"
+    "• 📥 /bm — media inbox: forward a video once, use it in any broadcast\n"
+    "• 🎞 /reel — curate the website's auto-playing reel\n"
+    "• 📡 /storageset — point the media cache at a channel (or back to per-store)\n"
     "• /cancel — abort whatever the bot is asking you"
 )
 

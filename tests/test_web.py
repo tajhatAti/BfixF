@@ -13,7 +13,7 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient      # noqa: E402
 
 from app import config as cfg                  # noqa: E402
-from app.services import billing, broadcast    # noqa: E402
+from app.services import billing, broadcast, settings  # noqa: E402
 from app.storage import db                     # noqa: E402
 from tests.test_flows import ADMIN_ID, USER_ID  # noqa: E402
 
@@ -952,3 +952,451 @@ def test_emergency_actions_flip_the_switches(client):
     # no login, no switch
     denied = client.post("/admin/emergency/maintenance", data={"value": "1"}, follow_redirects=False)
     assert denied.status_code == 303 and settings.get_bool("MAINTENANCE_MODE", False) is False
+
+
+# ------------------------------------------------------ admin shell & panel UI
+def test_the_sidebar_groups_every_admin_page(client):
+    """The panel is organised in collapsible groups — no page without a link."""
+    page = client.get("/admin", headers=_auth()).text
+    for href in ("/admin/stores", "/admin/files", "/admin/channels", "/admin/reel",
+                 "/admin/broadcast", "/admin/users", "/admin/orders", "/admin/links",
+                 "/admin/analytics", "/admin/self-test", "/admin/logs", "/admin/download",
+                 "/admin/settings", "/admin/texts", "/admin/security", "/admin/session",
+                 "/admin/emergency"):
+        assert f'href="{href.lstrip("/")}"' in page or f'href="{href}"' in page, href
+    assert page.count("navgrp") >= 5, "the groups must be collapsible"
+    assert "open" in page, "the group holding the current page is expanded"
+
+
+def test_the_quick_actions_are_on_the_overview(client):
+    page = client.get("/admin", headers=_auth()).text
+    assert "quick" in page
+    for label in ("Create store", "Videos &amp; files", "New broadcast", "Home page reel"):
+        assert label in page, label
+
+
+def test_the_panel_theme_is_black_and_yellow(client):
+    """Owner-requested dark surfaces and high contrast yellow actions."""
+    from web import adminui
+    css = adminui.THEME_CSS
+    assert "--accent:#facc15" in css
+    assert "color-scheme: dark" in css
+    assert "--bg:#0c0c0c" in css
+    assert "--rail:#080808" in css               # the black rail
+    assert "linear-gradient(" not in css and "radial-gradient(" not in css
+    # The only colours allowed are the two status colours (a real red for danger,
+    # a green for “done”) — the whole layout itself stays black and white.
+    for forbidden in ("#245bd6", "#0f766e", "#172033", "tomato"):
+        assert forbidden not in css
+    # …and the old blue/teal from the shared base stylesheet is flattened where the
+    # panel reuses those elements (the setup wizard's steps, hero, spinner, tick).
+    for legacy in (".step .num", ".hero", ".spin", ".tick"):
+        assert legacy in css
+
+
+def test_every_admin_page_starts_with_a_heading(client):
+    """Organised panel: each screen opens with breadcrumb + title + explanation."""
+    _store()
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    for path in ("/admin", "/admin/audit", "/admin/analytics", "/admin/stores",
+                 "/admin/files", "/admin/users", "/admin/orders", "/admin/links",
+                 "/admin/settings", "/admin/texts", "/admin/channels",
+                 "/admin/broadcast", "/admin/reel", "/admin/logs", "/admin/self-test",
+                 "/admin/emergency", "/admin/security", "/admin/digest",
+                 "/admin/download", "/admin/session"):
+        page = client.get(path, headers=_auth()).text
+        assert 'class="page-heading"' in page, f"{path} has no page heading"
+        assert 'class="crumbs"' in page, f"{path} has no breadcrumb"
+    # the overview keeps the greeting the dashboard test asserts
+    assert "Welcome back" in client.get("/admin", headers=_auth()).text
+
+
+def test_the_panel_shell_has_the_new_navigation_pieces(client):
+    """The redesigned shell: breadcrumb, palette trigger, rail footer."""
+    page = client.get("/admin", headers=_auth()).text
+    assert 'class="crumbs"' in page and "Overview" in page
+    assert 'id="palette-open"' in page            # Ctrl+K command palette
+    assert 'id="palette"' in page
+    assert "rail-foot" in page
+    assert "control room" in page
+
+
+def test_the_overview_explains_broadcast_reachability(client):
+    db.touch_user(USER_ID, "Reachable", "reach")
+    db.touch_user(USER_ID + 1, "Silent", None)
+    db.set_user_peer(USER_ID, 123456789)
+    page = client.get("/admin", headers=_auth()).text
+    assert "ইউজারের কাছে ব্রডকাস্ট পৌঁছাবে" in page or "সব" in page
+
+
+# ------------------------------------------------- per-store channel dashboard
+def test_the_channels_page_lists_one_row_per_store(client):
+    store = db.create_store(ADMIN_ID, "Alpha store")
+    db.create_store(ADMIN_ID, "Beta store")
+    db.set_meta(f"store_cache_channel:{store['id']}", "-1001900000001")
+    db.set_chat_peer(-1001900000001, 987, "Alpha - media")
+
+    page = client.get("/admin/channels", headers=_auth()).text
+    assert "প্রতি স্টোরের আলাদা চ্যানেল" in page
+    assert "Alpha store" in page and "Beta store" in page
+    assert "-1001900000001" in page
+    # links are base-relative on purpose (see app/services/basepath.py)
+    assert "channels/store/" in page and "cache/reset" in page
+
+
+def test_resetting_a_store_cache_channel_forgets_the_pair(client):
+    store = db.create_store(ADMIN_ID, "Reset me")
+    db.set_meta(f"store_cache_channel:{store['id']}", "-1001900000009")
+
+    response = client.post(f"/admin/channels/store/{store['id']}/cache/reset",
+                           headers=_auth(), follow_redirects=False)
+    assert response.status_code == 303
+    assert db.get_meta(f"store_cache_channel:{store['id']}", "") == ""
+
+
+def test_the_cache_warning_is_shown_on_the_channels_page(client):
+    settings.set("STORAGE_CHANNEL_WARNING", "ক্যাশ চ্যানেল পাওয়া যাচ্ছে না — STORAGE_CHANNEL দিন")
+    page = client.get("/admin/channels", headers=_auth()).text
+    assert "STORAGE_CHANNEL দিন" in page
+    settings.set("STORAGE_CHANNEL_WARNING", "")
+
+
+def test_the_watch_hero_follows_the_reel_settings(client):
+    """Hero playback is not hard-coded — the reel page decides autoplay/muted/loop."""
+    store = _store("Watcher")
+    db.add_file(store["id"], "Vid", "Video", -100, 7, size=3_000_000)
+    settings._cache.clear()
+    settings.set("FEED_AUTOPLAY", "1")
+    settings.set("FEED_MUTED", "1")
+    settings.set("FEED_LOOP", "1")
+    on = client.get("/watch").text
+    assert "autoplay" in on and "muted" in on and "loop" in on
+
+    settings.set("FEED_AUTOPLAY", "0")
+    settings.set("FEED_MUTED", "0")
+    settings.set("FEED_LOOP", "0")
+    off = client.get("/watch").text
+    assert '<video id="hero-media" controls playsinline' in off
+    assert "autoplay" not in off.split("hero-media")[1][:120]
+
+
+def test_deleting_a_user_removes_the_ban_too(client):
+    _store("Cleanup")
+    db.ban_user(USER_ID, "spam", ADMIN_ID)
+    db.touch_user(USER_ID, "spam", "sp")
+    assert db.is_banned(USER_ID)
+    assert db.delete_user(USER_ID) is True
+    assert db.is_banned(USER_ID) is False
+
+
+def test_the_studio_multi_message_mode_stores_the_whole_plan(client):
+    """“বহু-মেসেজ” = text first, then one separate message per attachment."""
+    store = _store()
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    file_id = db.add_file(store["id"], "Promo", "Video", -100, 9, size=1_000)
+
+    response = client.post(
+        "/admin/broadcast/new",
+        data={"audience": "all", "mode": "multi", "action": "draft", "file_id": file_id,
+              "text": "প্রথম মেসেজ", "captions": "ছবিটার ক্যাপশন"},
+        headers=_auth(), follow_redirects=False)
+    assert response.status_code == 303
+    campaign = db.campaigns(limit=1)[0]
+    plan = db.campaign_groups(campaign["id"])
+    assert [row["kind"] for row in plan][0] == "text"
+    assert plan[0]["text"].strip() == "প্রথম মেসেজ"
+    assert int(plan[1]["file_id"]) == file_id
+    assert plan[1]["text"] == "ছবিটার ক্যাপশন"
+    # the single-message columns stay empty so nothing is sent twice
+    assert not campaign["text"] and not campaign["file_ids"]
+
+
+def test_multi_message_mode_refuses_an_empty_draft(client):
+    _store()
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    response = client.post("/admin/broadcast/new",
+                           data={"audience": "all", "mode": "multi", "action": "draft",
+                                 "text": "", "file_id": 0},
+                           headers=_auth(), follow_redirects=False)
+    assert response.status_code == 303 and "warn=" in response.headers["location"]
+    assert db.campaigns(limit=1) == []
+
+
+def test_the_campaign_page_keeps_the_public_draft_link(client):
+    """The link is created once — it must stay visible instead of only in a flash."""
+    _store()
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    client.post("/admin/broadcast/new",
+                data={"audience": "all", "text": "খসড়া", "action": "draft"},
+                headers=_auth(), follow_redirects=False)
+    campaign_id = db.campaigns(limit=1)[0]["id"]
+    shared = client.post(f"/admin/broadcast/{campaign_id}/share", headers=_auth(),
+                         follow_redirects=False)
+    assert shared.status_code == 303
+    page = client.get(f"/admin/broadcast/{campaign_id}", headers=_auth()).text
+    assert "খসড়ার পাবলিক লিংক" in page
+    token = db.campaign_links(campaign_id, kind="draft")[0]["token"]
+    assert token in page
+
+
+def test_the_public_draft_page_is_read_only_and_hides_the_panel(client):
+    _store()
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    client.post("/admin/broadcast/new",
+                data={"audience": "all", "text": "পাবলিক খসড়া", "action": "draft"},
+                headers=_auth(), follow_redirects=False)
+    campaign_id = db.campaigns(limit=1)[0]["id"]
+    client.post(f"/admin/broadcast/{campaign_id}/share", headers=_auth(),
+                follow_redirects=False)
+    token = db.campaign_links(campaign_id, kind="draft")[0]["token"]
+
+    page = client.get(f"/draft/{token}")
+    assert page.status_code == 200 and "পাবলিক খসড়া" in page.text
+    for leak in ("/admin/settings", "control room", "ইউজার", "পাসওয়ার্ড"):
+        assert leak not in page.text
+    assert db.campaign_links(campaign_id, kind="draft")[0]["clicks"] >= 1
+    assert client.get("/draft/does-not-exist").status_code == 200   # friendly, not a crash
+
+
+def test_campaign_actions_leave_an_audit_trail(client):
+    """Every panel button that touches a campaign is answered on /admin/audit."""
+    from app.services import audit
+    _store()
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    client.post("/admin/broadcast/new",
+                data={"audience": "all", "text": "ট্রেইল", "action": "draft"},
+                headers=_auth(), follow_redirects=False)
+    campaign_id = db.campaigns(limit=1)[0]["id"]
+    client.post(f"/admin/broadcast/{campaign_id}/share", headers=_auth(),
+                follow_redirects=False)
+    client.post(f"/admin/broadcast/{campaign_id}/retry", headers=_auth(),
+                follow_redirects=False)
+    client.post(f"/admin/broadcast/{campaign_id}/delete", headers=_auth(),
+                follow_redirects=False)
+
+    names = [row["name"] for row in audit.recent(limit=100)]
+    assert "draft_shared" in names
+    assert "broadcast_retry" in names and "broadcast_deleted" in names
+    # and the page shows them with a human label, not the raw event name
+    page = client.get("/admin/audit", headers=_auth()).text
+    assert "খসড়ার পাবলিক লিংক" in page and "ক্যাম্পেইন মুছে ফেলা" in page
+    assert "draft_shared" not in page
+
+
+def test_the_digest_page_is_a_page_not_an_action(client):
+    """The nav link used to fire a broadcast on GET — it must be a screen now."""
+    store = _store("Digest store")
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    page = client.get("/admin/digest", headers=_auth())
+    assert page.status_code == 200
+    assert "সাপ্তাহিক ডাইজেস্ট" in page.text
+    assert 'class="page-heading"' in page.text and 'class="crumbs"' in page.text
+    # form actions are base-relative (they work under a hosted /live/<job>/ prefix)
+    assert "admin/digest/save" in page.text and "admin/digest/run" in page.text
+    assert not db.campaigns(limit=5)                      # opening the page sends nothing
+
+    saved = client.post("/admin/digest/save",
+                        data={"enabled": "1", "weekday": "2", "hour": "9",
+                              "max_files": "3"},
+                        headers=_auth(), follow_redirects=False)
+    assert saved.status_code == 303
+    from app.services import settings
+    assert settings.get_bool("DIGEST_ENABLED", False) is True
+    assert settings.get_int("DIGEST_WEEKDAY", -1) == 2
+    assert settings.get_int("DIGEST_HOUR", -1) == 9
+    assert settings.get_int("DIGEST_MAX_FILES", -1) == 3
+
+    drafted = client.post("/admin/digest/run", data={"action": "draft"},
+                          headers=_auth(), follow_redirects=False)
+    assert drafted.status_code == 303 and "flash=" in drafted.headers["location"]
+    campaigns = db.campaigns(limit=5)
+    assert campaigns and campaigns[0]["title"].startswith("সাপ্তাহিক ডাইজেস্ট")
+    assert campaigns[0]["status"] == "draft"              # nothing was delivered
+
+
+# ------------------------------------------------------- backup / move to a host
+def test_the_backup_page_explains_and_offers_the_download(client):
+    _store("Backup store")
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    page = client.get("/admin/backup", headers=_auth())
+    assert page.status_code == 200
+    assert 'class="page-heading"' in page.text and 'class="crumbs"' in page.text
+    assert "backup/download" in page.text                      # ⬇ নামান
+    assert "backup/restore" in page.text and "backup/save" in page.text
+    assert "BFIXF1:" in page.text                              # paste box
+    assert "নতুন হোস্টে নেওয়ার ধাপ" in page.text
+
+    data = client.get("/admin/backup/download", headers=_auth())
+    assert data.status_code == 200
+    assert data.content[:2] == b"\x1f\x8b"                     # a real gzip backup
+    from app.services import portable
+    info = portable.describe(data.content)
+    assert info["ok"] and info["counts"]["users"] >= 1
+
+
+def test_a_restore_from_the_panel_brings_the_data_back(client):
+    store = _store("Before")
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    from app.services import portable
+    backup = portable.export_bytes()
+
+    db.create_store(ADMIN_ID, "Made after the backup")
+    assert len(db.all_stores()) == 2
+
+    response = client.post("/admin/backup/restore",
+                           files={"file": ("move.bfixf.gz", backup, "application/gzip")},
+                           data={"confirm": "yes"}, headers=_auth(),
+                           follow_redirects=False)
+    assert response.status_code == 303
+    assert "flash=" in response.headers["location"]
+    names = [row["name"] for row in db.all_stores()]
+    assert names == ["Before"]                                  # back to the snapshot
+    page = client.get("/admin/backup", headers=_auth()).text
+    assert "ইনস্টল ফিরিয়ে আনা হয়েছে" in page                     # the report stays on screen
+    assert "সেফটি" in page                                      # safety copy is listed
+
+    from app.services import audit
+    assert "restore_done" in [row["name"] for row in audit.recent(limit=50)]
+    trail = client.get("/admin/audit", headers=_auth()).text
+    assert "ইনস্টল ফিরিয়ে আনা" in trail                         # with a human label
+
+
+def test_a_restore_needs_the_confirmation_box(client):
+    _store("Guarded")
+    from app.services import portable
+    backup = portable.export_bytes()
+    response = client.post("/admin/backup/restore",
+                           files={"file": ("x.bfixf.gz", backup, "application/gzip")},
+                           headers=_auth(), follow_redirects=False)
+    assert response.status_code == 303 and "warn=" in response.headers["location"]
+    assert len(db.all_stores()) == 1                            # nothing happened
+
+
+def test_a_broken_backup_is_refused_and_changes_nothing(client):
+    _store("Safe")
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    response = client.post("/admin/backup/restore",
+                           files={"file": ("broken.bfixf.gz", b"definitely not a backup",
+                                           "application/gzip")},
+                           data={"confirm": "yes"}, headers=_auth(),
+                           follow_redirects=False)
+    assert response.status_code == 303 and "warn=" in response.headers["location"]
+    assert len(db.all_stores()) == 1 and db.stats()["users"] >= 1
+
+
+def test_the_backup_code_can_be_pasted_in_the_panel(client):
+    _store("Pasted")
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    from app.services import portable
+    codes = portable.text_codes(chunk=600)
+    assert len(codes) > 1
+    db.create_store(ADMIN_ID, "Temp")
+    response = client.post("/admin/backup/restore",
+                           data={"confirm": "yes", "code": "\n".join(reversed(codes))},
+                           headers=_auth(), follow_redirects=False)
+    assert response.status_code == 303 and "flash=" in response.headers["location"]
+    assert [row["name"] for row in db.all_stores()] == ["Pasted"]
+
+
+def test_a_new_host_can_restore_from_the_setup_screen(tmp_path, monkeypatch):
+    """The real move: fresh server, nothing configured → restore before /setup."""
+    monkeypatch.setattr(cfg, "BACKUP_DIR", str(tmp_path / "backups"))
+    db.bind(str(tmp_path / "origin.sqlite3"))
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    db.set_user_peer(USER_ID, 4242, "Buyer")
+    store = db.create_store(ADMIN_ID, "Origin store")
+    db.add_file(store["id"], "Vid", "Video", -100, 5, size=1000)
+    from app.services import portable
+    backup = portable.export_bytes()
+
+    # new host: empty database, bot not configured yet → the panel is not reachable
+    monkeypatch.setattr(cfg, "BOT_TOKEN", "")
+    monkeypatch.setattr(cfg, "API_ID", 0)
+    monkeypatch.setattr(cfg, "API_HASH", "")
+    db.bind(str(tmp_path / "newhost.sqlite3"))
+    import web.dashboard as dashboard
+    from fastapi.testclient import TestClient
+    fresh = TestClient(dashboard.app)
+    assert fresh.get("/admin", follow_redirects=False).status_code == 303   # → /setup
+    # the owner signs in with the panel password, then lands on the setup screen
+    login = fresh.post("/admin/login", data={"password": dashboard.ADMIN_LOGIN_PASSWORD},
+                       follow_redirects=False)
+    assert login.status_code in (200, 303)
+    setup = fresh.get("/setup")
+    assert "ফিরিয়ে আনুন" in setup.text                          # the restore card is there
+
+    response = fresh.post("/setup/restore",
+                          files={"file": ("move.bfixf.gz", backup, "application/gzip")},
+                          data={"confirm": "yes"}, follow_redirects=False)
+    assert response.status_code == 303
+    assert db.stats()["users"] >= 1 and db.all_stores()[0]["name"] == "Origin store"
+    assert db.user_peer(USER_ID)["access_hash"] == 4242         # broadcasts still work
+
+
+def test_an_older_versions_database_can_be_uploaded_to_the_panel(client, tmp_path):
+    """“পুরোনো ভার্সনের ডেটাবেজ সোজা সাইটে দিলে চলবে?” — হ্যাঁ, নিজে থেকেই বোঝে।"""
+    import sqlite3
+    path = str(tmp_path / "old.sqlite3")
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE users (user_id INTEGER PRIMARY KEY, name TEXT, username TEXT,
+          joined_at REAL, last_seen REAL, lang TEXT, sort_pref TEXT);
+        CREATE TABLE stores (id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER,
+          name TEXT, slug TEXT UNIQUE, created_at REAL, is_premium INTEGER,
+          cover TEXT, description TEXT);
+        CREATE TABLE files (id INTEGER PRIMARY KEY AUTOINCREMENT, store_id INTEGER,
+          name TEXT, kind TEXT, chat_id INTEGER, msg_id INTEGER, code TEXT UNIQUE,
+          size INTEGER, duration INTEGER, created_at REAL, views INTEGER DEFAULT 0);
+    """)
+    conn.execute("INSERT INTO users VALUES (900, 'পুরোনো মালিক', 'old_owner', 1.0, 2.0, 'bn', 'default')")
+    conn.execute("INSERT INTO stores (admin_id, name, slug, created_at, is_premium) "
+                 "VALUES (900, 'পুরোনো স্টোর', 'old-store', 3.0, 0)")
+    conn.execute("INSERT INTO files (store_id, name, kind, chat_id, msg_id, code, size, created_at) "
+                 "VALUES (1, 'পুরোনো ভিডিও', 'Video', -100, 12, 'f1', 500, 4.0)")
+    conn.commit()
+    conn.close()
+
+    blob = open(path, "rb").read()
+    response = client.post("/admin/backup/restore",
+                           files={"file": ("old.sqlite3", blob, "application/x-sqlite3")},
+                           data={"confirm": "yes"}, headers=_auth(), follow_redirects=False)
+    assert response.status_code == 303 and "flash=" in response.headers["location"]
+    assert [row["name"] for row in db.all_stores()] == ["পুরোনো স্টোর"]
+    assert db.user(900)["username"] == "old_owner"       # ব্যবহারকারীর আইডি অটুট
+    assert len(db.files_of(db.all_stores()[0]["id"])) == 1
+    page = client.get("/admin/backup", headers=_auth()).text
+    assert "ইনস্টল ফিরিয়ে আনা হয়েছে" in page
+    from app.services import portable
+    assert portable.local_backups()                       # ফিরে যাওয়ার রাস্তা আছে
+
+
+def test_a_standalone_bots_user_list_merges_into_the_panel(client, tmp_path):
+    """পুরোনো আলাদা বটের users.db → ইউজার যোগ হয়, বর্তমান ডেটা মুছে যায় না।"""
+    import sqlite3
+    _store("Living store")
+    db.touch_user(USER_ID, "Buyer", "buyer")
+    path = str(tmp_path / "users.db")
+    conn = sqlite3.connect(path)
+    conn.executescript("CREATE TABLE users(id INTEGER PRIMARY KEY, blocked INTEGER DEFAULT 0,"
+                       " username TEXT, name TEXT);")
+    conn.executemany("INSERT INTO users VALUES (?,?,?,?)",
+                     [(7001, 0, "old1", "পুরোনো ১"), (7002, 1, "old2", "পুরোনো ২")])
+    conn.commit()
+    conn.close()
+
+    response = client.post("/admin/backup/restore",
+                           files={"file": ("users.db", open(path, "rb").read(),
+                                           "application/x-sqlite3")},
+                           data={"confirm": "yes"}, headers=_auth(), follow_redirects=False)
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert "flash=" in location and "orphan" not in location
+    from urllib.parse import unquote_plus
+    assert "যোগ করা হয়েছে" in unquote_plus(location)      # মেসেজটা স্পষ্ট
+    assert "নতুন ২" in unquote_plus(location)
+    assert "1 স্টোর" in unquote_plus(location)            # স্টোরের আসল সংখ্যাটাও দেখায়
+    assert [row["name"] for row in db.all_stores()] == ["Living store"]   # স্টোর অটুট
+    assert db.user(USER_ID) is not None                   # বর্তমান ইউজারও অটুট
+    assert db.user(7001) is not None and db.user(7002) is not None
+    page = client.get("/admin/backup", headers=_auth()).text
+    assert "যোগ করা হয়েছে" in page and "কিছুই মুছে যায়নি" in page

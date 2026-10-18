@@ -24,8 +24,23 @@ async def on_startup(client: TelegramClient) -> None:
     runtime.bot_id = me.id
     # Remember it in the database too: the public website can then build
     # t.me deep links even while the bot itself is offline.
-    if runtime.bot_username:
+    if runtime.bot_username and os.getenv("BOT_EXTRA") != "1":
+        # The public links must keep pointing at the *main* bot. An extra bot
+        # records its own name in the `bots` table instead.
         db.set_meta("bot_username", runtime.bot_username)
+    try:
+        if os.getenv("BOT_EXTRA") == "1":
+            from app.services import botrunner
+            row = db.bots_store.bot_by_token(cfg.BOT_TOKEN)
+            if row is None:
+                bot_id = botrunner.add(cfg.BOT_TOKEN, label=os.getenv("BOT_LABEL") or "",
+                                       admin_id=(cfg.ADMIN_IDS or [0])[0],
+                                       api_id=cfg.API_ID, api_hash=cfg.API_HASH,
+                                       origin="env")["id"]
+                row = db.bots_store.bot(bot_id)
+            botrunner.learn_username(row, runtime.bot_username)
+    except Exception as exc:
+        log.debug("extra bot registration skipped: %s", exc)
     log.info("Bot online as @%s (id=%s)", runtime.bot_username, me.id)
 
     stats = db.stats()
@@ -34,7 +49,8 @@ async def on_startup(client: TelegramClient) -> None:
 
     await seed_and_reconnect_sessions()
     await prepare_media_cache()
-    scheduler.start_all()
+    if os.getenv("BOT_EXTRA") != "1":
+        scheduler.start_all()  # one owner of broadcasts/backups, never duplicate jobs
 
 
 async def prepare_media_cache() -> None:
@@ -93,7 +109,14 @@ async def admin_error_notifier(text: str) -> None:
 def main() -> int:
     setup_logging()
 
-    if cfg.HOSTED:
+    if os.getenv("BOT_EXTRA") == "1":
+        # Started by `app/services/botrunner.py` as an *extra* bot: this process
+        # only polls its own token. The website already runs in the main process,
+        # so it must not try to bind the port again.
+        globals()["start_website"] = lambda: None
+        log.info("Extra bot mode (%s): serving Telegram only", os.getenv("BOT_LABEL") or "bot")
+
+    if cfg.HOSTED and os.getenv("BOT_EXTRA") != "1":
         # A hosting panel (CodeNest/RunSpace, Render, Railway…) sets $PORT and
         # waits for us to listen on it. `run.py` is exactly that product — the
         # website plus a bot that reconnects instead of dying — so reuse it
@@ -142,11 +165,12 @@ def main() -> int:
     # Handlers register themselves on import (they need runtime.bot to exist),
     # so we import every handler module for its side effects.
     from importlib import import_module
-    for module_name in ("app.handlers.guard", "app.handlers.br", "app.handlers.admin",
+    for module_name in ("app.handlers.guard", "app.handlers.portable", "app.handlers.br",
+                        "app.handlers.admin",
                         "app.handlers.billing",
                         "app.handlers.extras", "app.handlers.inline", "app.handlers.linkpanel",
-                        "app.handlers.manage", "app.handlers.messages", "app.handlers.panel_v3",
-                        "app.handlers.user"):
+                        "app.handlers.bots", "app.handlers.manage", "app.handlers.messages",
+                        "app.handlers.panel_v3", "app.handlers.user"):
         import_module(module_name)
 
     import app.logger as logger_module

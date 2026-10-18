@@ -111,9 +111,21 @@ FLOOD_SAFETY_MAX = get_int("FLOOD_SAFETY_MAX", 900)   # wait up to 15 min on Flo
 # ------------------------------------------------------ broadcast studio (v3)
 # A campaign sends up to BROADCAST_MAX_FILES files per user.
 BROADCAST_MAX_FILES = get_int("BROADCAST_MAX_FILES", 5)
+# Public home page: the auto-playing reel + the “3–4 clips at once” wall.
+FEED_ENABLED = get_bool("FEED_ENABLED", True)
+FEED_COUNT = get_int("FEED_COUNT", 4)
+FEED_WALL = get_int("FEED_WALL", 4)
+FEED_AUTOPLAY = get_bool("FEED_AUTOPLAY", True)
+FEED_MUTED = get_bool("FEED_MUTED", True)
+FEED_LOOP = get_bool("FEED_LOOP", True)
+FEED_GALLERY_COUNT = get_int("FEED_GALLERY_COUNT", 36)
 # Explicit queued jobs always start when the bot reconnects; this gates only jobs
 # whose status was `running` when the process stopped.
 BROADCAST_AUTO_RESUME = get_bool("BROADCAST_AUTO_RESUME", True)
+# Pacing: `BROADCAST_BATCH` sends in flight, then a `BROADCAST_BATCH_PAUSE` second
+# breather — Telegram's bot limit is ~30 messages/second.
+BROADCAST_BATCH = get_int("BROADCAST_BATCH", 25)
+BROADCAST_BATCH_PAUSE = get_float("BROADCAST_BATCH_PAUSE", 1.0)
 
 # ---------------------------------------------------------------------- paths
 DB_FILE = get_str("DB_FILE", str(BASE_DIR / "bot_data.sqlite3"))
@@ -160,8 +172,8 @@ WEB_HOST = get_str("WEB_HOST", get_str("HOST", "0.0.0.0"))
 # Hosting panels (CodeNest, Render, Railway, …) inject $PORT and route to it.
 WEB_PORT = get_int("PORT", get_int("WEB_PORT", 8080))
 WEB_SESSION_HOURS = get_int("WEB_SESSION_HOURS", 72)
-WEB_TITLE = get_str("WEB_TITLE", "Ahad OrgEx")
-SITE_URL = get_str("SITE_URL", "https://ahadorgex.onrender.com")
+WEB_TITLE = get_str("WEB_TITLE", "Desi Site")
+SITE_URL = get_str("SITE_URL", "https://codenestauth5.onrender.com/live/u3-esi-38a23a")
 #: True when a hosting panel gave us a port to listen on (CodeNest/RunSpace,
 #: Render, Railway…). The website must then start even if WEB_ENABLED was
 #: switched off, otherwise the panel shows “no web listener”.

@@ -17,6 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app import config as cfg          # noqa: E402
 from app.storage import db             # noqa: E402
 
+ADMIN_ID = 111_000_001
+
 DEMO = {
     "🎬 সিনেমা হাউস": ("premium", [
         ("Interstellar (2014) 1080p", "Video", 2.4 * 1024 ** 3, 4_512),
@@ -32,6 +34,13 @@ DEMO = {
         ("Facebook Marketing Guide.pdf", "Document", 4.2 * 1024 ** 2, 640),
         ("Netflix Intro Pack.zip", "Document", 25 * 1024 ** 2, 410),
     ]),
+    "🎞 রিল ডেমো (ফ্রি ভিডিও)": ("free", [
+        ("কুরিয়ার সিরিজ S01E02", "Video", 0.6 * 1024 ** 3, 890),
+        ("পদ্মা সেতু ডকুমেন্টারি", "Video", 0.4 * 1024 ** 3, 760),
+        ("বাংলা কার্টুন — ঈদ স্পেশাল", "Video", 0.35 * 1024 ** 3, 640),
+        ("কক্সবাজার ট্রাভেল ভ্লগ", "Video", 0.5 * 1024 ** 3, 520),
+        ("ওয়েব সিরিজ পোস্টার", "Photo", 3 * 1024 ** 2, 410),
+    ]),
     "🎵 গানের ভান্ডার": ("free", [
         ("ফুওয়াদ আল মাহমুদ — নির্বাচিত", "Audio", 120 * 1024 ** 2, 720),
         ("Best of Coke Studio 2024", "Audio", 260 * 1024 ** 2, 530),
@@ -39,10 +48,150 @@ DEMO = {
     ]),
 }
 
+#: The clips the seeded preview install streams from disk (`chat_id = 0` in `files`,
+#: see `app/services/feed.py`). Real Telegram needs a bot session; this is how the
+#: reel and the “several at once” wall can be checked before one exists.
+DEMO_CLIPS = [
+    ("কুরিয়ার সিরিজ S01E01", "gradients=s=360x640:c0=0x0b1f3a:c1=0x1f6feb:d=6:speed=.10"),
+    ("বার্তা E01 (ওয়েব সিরিজ)", "gradients=s=360x640:c0=0x241d12:c1=0xc9a45c:d=6:speed=.16"),
+    ("পদ্মা সেতু ডকুমেন্টারি", "testsrc2=size=360x640:rate=25"),
+    ("বাংলা কার্টুন — ঈদ স্পেশাল", "gradients=s=360x640:c0=0x2a1020:c1=0xe05c8a:d=6:speed=.22"),
+]
+
 NAMES = ["রহিম", "করিম", "সাদিয়া", "ইসরাত", "নাবিলা", "তানিম", "ফারহান", "লামিয়া",
          "নাঈম", "মিম", "রাফি", "সাদ", "অহনা", "রিয়াদ", "তাসনিম", "হাসান",
          "জান্নাত", "শাকিব", "প্রিয়া", "মেহেদী", "সুমাইয়া", "আরিফ", "নাফিসা", "রুবেল"]
 
+
+def _ffmpeg() -> str | None:
+    """A bundled ffmpeg, if the optional `imageio-ffmpeg` package is installed."""
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def _run(ffmpeg: str, args: list[str]) -> bool:
+    import subprocess
+    try:
+        done = subprocess.run([ffmpeg, "-v", "error", "-y", *args],
+                              capture_output=True, timeout=120)
+        return done.returncode == 0
+    except Exception:
+        return False
+
+
+def seed_clips(admin_id: int) -> int:
+    """Write a handful of tiny local clips + poster frames for the preview install.
+
+    Silent, 9:16, six seconds each — long enough to show autoplay, the wall and the
+    player, small enough (a few dozen KB) to be disposable.
+    """
+    from pathlib import Path
+    ffmpeg = _ffmpeg()
+    if not ffmpeg:
+        print("  • demo clips skipped — install imageio-ffmpeg for a playable preview")
+        return 0
+    out = Path(os.getenv("FEED_DEMO_DIR", "demo_media"))
+    out.mkdir(parents=True, exist_ok=True)
+    store = db.store_by_name(admin_id, "🎞 রিল ডেমো (ফ্রি ভিডিও)") \
+        or db.create_store(admin_id, "🎞 রিল ডেমো (ফ্রি ভিডিও)")
+    db.update_store(store["id"], is_premium=0)
+    made = 0
+    seconds = 6
+    for index, (title, source) in enumerate(DEMO_CLIPS):
+        msg_id = 900 + index
+        clip = out / f"{msg_id}.mp4"
+        frame = out / f"{msg_id}.jpg"
+        if not clip.is_file() and not _run(ffmpeg, [
+                "-f", "lavfi", "-i", source, "-t", str(seconds), "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart", "-an", str(clip)]):
+            continue
+        if not frame.is_file():
+            _run(ffmpeg, ["-i", str(clip), "-frames:v", "1", "-q:v", "4", str(frame)])
+        size = clip.stat().st_size if clip.is_file() else 0
+        existing = next((row for row in db.files_of(store["id"])
+                         if int(row.get("msg_id") or 0) == msg_id), None)
+        if existing is None:
+            db.add_file(store["id"], title, "Video", 0, msg_id=msg_id, size=size,
+                        duration=seconds)
+        made += 1
+    # a poster photo too, so the reel/wall also shows the photo path
+    poster = out / "990.jpg"
+    if not poster.is_file():
+        _run(ffmpeg, ["-f", "lavfi", "-i", "mandelbrot=s=720x1280:rate=1",
+                      "-frames:v", "1", "-q:v", "4", str(poster)])
+    if poster.is_file() and not next((row for row in db.files_of(store["id"])
+                                      if int(row.get("msg_id") or 0) == 990), None):
+        db.add_file(store["id"], "ওয়েব সিরিজ পোস্টার", "Photo", 0, msg_id=990,
+                    size=poster.stat().st_size)
+    print(f"  • demo clips in {out}: {made} videos + 1 photo")
+    return made
+
+
+
+def seed_visitors(admin_id: int = 0, days: int = 14) -> int:
+    """Back-dated visitor history, so the 📈 ভিজিটর page has something to show.
+
+    Real visits are recorded by the website itself (`app/services/visitors.py`);
+    this only exists so an owner can *see* the page working before the site has
+    had traffic. Never touches a production database (DB_FILE only).
+    """
+    import time
+
+    pages = ["/", "/stores", "/watch", "/help", "/search?q=কুরিয়ার"]
+    sources = ["সরাসরি", "টেলিগ্রাম", "গুগল", "ফেসবুক", "লিংক থেকে"]
+    devices = [("📱 মোবাইল", "mobile", "Android", "Chrome"),
+               ("💻 ডেস্কটপ", "desktop", "Windows", "Chrome"),
+               ("📱 মোবাইল", "mobile", "iOS", "Safari")]
+    countries = ["BD", "BD", "BD", "IN", "SA", "US"]
+    names = ["রহিম", "করিম", "সাদিয়া", "ইসরাত", "নাবিলা", "তানিম", "ফারহান", "লামিয়া"]
+    store_ids = [s["id"] for s in db.all_stores()] or [0]
+    file_ids = [f["id"] for f in db.recent_public_media(limit=6)] or [0]
+    made = 0
+    for day in range(days - 1, -1, -1):
+        for index in range(random.randint(3, 9)):
+            when = time.time() - day * 86400 - random.randint(0, 20 * 3600)
+            vid = f"demo{day:02d}{index:03d}{random.randint(1000, 9999)}"
+            device, kind, os_name, browser = random.choice(devices)
+            db.visitors.open_visit(
+                vid, user_id=random.choice([0, 0, 0, admin_id]) if admin_id else 0,
+                ip=f"103.{random.randint(1, 250)}.{random.randint(1, 250)}.{random.randint(1, 250)}",
+                country=random.choice(countries), device=device, device_kind=kind,
+                os=os_name, browser=browser, source=random.choice(sources),
+                landing=random.choice(pages), user_agent="seeded")
+            db._run("UPDATE visits SET started_at = ?, last_seen = ? WHERE vid = ?",
+                    (when, when + random.randint(40, 900), vid))
+            for step in range(random.randint(1, 6)):
+                db._run("INSERT INTO page_views(vid, user_id, path, status, ms, is_admin, ts)"
+                        " VALUES(?,?,?,200,?,0,?)",
+                        (vid, 0, random.choice(pages), random.randint(40, 900),
+                         when + step * 45))
+            db._run("UPDATE visits SET pageviews = ? WHERE vid = ?",
+                    (random.randint(1, 6), vid))
+            for event in random.sample(["media_play", "store_open", "media_open", "bot_open",
+                                        "search", "link_open"],
+                                       k=random.randint(1, 3)):
+                db._run("INSERT INTO visit_events(vid, user_id, name, detail, path, store_id,"
+                        " file_id, ts) VALUES(?,?,?,?,?,?,?,?)",
+                        (vid, 0, event, "", random.choice(pages),
+                         random.choice(store_ids), random.choice(file_ids),
+                         when + random.randint(20, 600)))
+            made += 1
+    # a few of them are “online right now”, so the live card is not empty
+    for index in range(random.randint(2, 4)):
+        vid = f"now{index}{random.randint(1000, 9999)}"
+        db.visitors.open_visit(
+            vid, ip=f"103.{random.randint(1, 250)}.{random.randint(1, 250)}.{random.randint(1, 250)}",
+            country=random.choice(countries), device="📱 মোবাইল", device_kind="mobile",
+            os="Android", browser="Chrome", source=random.choice(sources),
+            landing=random.choice(pages), user_agent="seeded")
+        db._run("INSERT INTO visit_events(vid, name, detail, path, file_id, ts)"
+                " VALUES(?,?,?,?,?,?)",
+                (vid, "media_play", "", "/", random.choice(file_ids), time.time()))
+    print(f"  • visitors: {made + 4}টি ডেমো ভিজিট (শেষ {days} দিন)")
+    return made
 
 def main() -> int:
     db.bind(cfg.DB_FILE)
@@ -68,6 +217,9 @@ def main() -> int:
                     db.bump_views(file_id)
         stores[name] = store
         print(f"  • {name}: {len(db.files_of(store['id']))} files")
+
+    seed_clips(admin_id)
+    seed_visitors(admin_id)
 
     # users + a few grants + one pending order
     premium = stores["🎬 সিনেমা হাউস"]

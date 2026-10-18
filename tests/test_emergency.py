@@ -1,5 +1,6 @@
 """Emergency group, maintenance mode and the Telegram backup."""
 import asyncio
+import contextlib
 
 import pytest
 
@@ -46,3 +47,45 @@ async def test_backup_is_written_and_sent_to_every_admin(tmp_path, monkeypatch):
 
     assert result["sent"] == 2 and {chat for chat, _p in sent} == {ADMIN_ID, ADMIN_ID + 1}
     assert all(path.endswith(".sqlite3") for _c, path in sent)
+
+
+# ------------------------------------------------------------ /storageset (v3.2)
+@pytest.mark.asyncio
+async def test_storageset_shows_and_changes_the_cache_channel(tmp_path, monkeypatch):
+    """The one-command cure for a stale channel hash (see media_cache._resolve_peer)."""
+    db.bind(str(tmp_path / "storageset.sqlite3"))
+    settings._cache.clear()
+    monkeypatch.setattr(cfg, "ADMIN_IDS", [ADMIN_ID])
+    import app.handlers.guard as guard
+
+    events_sent: list[str] = []
+
+    class Event:
+        sender_id = ADMIN_ID
+        is_private, out, is_reply = True, False, False
+        pattern_match = None
+
+        def __init__(self, group):
+            self.pattern_match = type("M", (), {"group": lambda _self, _i: group})()
+
+        async def respond(self, text, buttons=None, **_kwargs):
+            events_sent.append(text)
+            return type("S", (), {"id": 1})()
+
+    from telethon import events as tl_events
+
+    async def call(group):
+        # Telethon turns the handler's StopPropagation into “handled”, so the test does
+        # the same rather than treating it as a failure.
+        with contextlib.suppress(tl_events.StopPropagation):
+            await guard.storageset_command(Event(group))
+
+    await call(None)
+    assert "ক্যাশ চ্যানেল" in events_sent[-1]
+
+    await call("@mycache")
+    assert settings.get_str("STORAGE_CHANNEL") == "@mycache"
+
+    await call("auto")
+    assert settings.get_str("STORAGE_CHANNEL") == ""
+    assert "প্রতিটা স্টোরের" in events_sent[-1]

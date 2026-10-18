@@ -28,7 +28,9 @@ from app.logger import log, setup_logging
 from app.services import credentials, secrets_guard
 from app.storage import db
 
-HANDLER_MODULES = ("app.handlers.guard", "app.handlers.br", "app.handlers.admin", "app.handlers.billing",
+HANDLER_MODULES = ("app.handlers.peers", "app.handlers.guard", "app.handlers.portable",
+                   "app.handlers.bots", "app.handlers.br",
+                   "app.handlers.reel", "app.handlers.admin", "app.handlers.billing",
                    "app.handlers.extras", "app.handlers.inline", "app.handlers.linkpanel",
                    "app.handlers.manage", "app.handlers.messages", "app.handlers.panel_v3",
                    "app.handlers.user")
@@ -141,6 +143,17 @@ async def run() -> int:
     tasks = [asyncio.create_task(web_worker()), asyncio.create_task(secrets_watchdog())]
     credentials.load()
     tasks.append(asyncio.create_task(bot_worker()))
+    # Several bots, one database: bring the extra ones up in their own processes
+    # (see app/services/botrunner.py). A blocked or restarting main bot no longer
+    # takes the whole service down with it.
+    try:
+        from app.services import botrunner
+        autostart = botrunner.autostart()
+        tasks.append(asyncio.create_task(botrunner.supervise()))
+        if autostart.get("started") or autostart.get("failed"):
+            log.info("extra bots: %s", autostart)
+    except Exception as exc:
+        log.warning("extra bots could not autostart: %s", exc)
 
     await asyncio.gather(*tasks)
     return 0

@@ -34,7 +34,7 @@ _prefix: contextvars.ContextVar[str] = contextvars.ContextVar("base_prefix", def
 
 #: ``href="/admin"``, ``href='/admin'`` and the unquoted ``action=/admin`` alike
 _ATTR = re.compile(
-    r'(?P<attr>\b(?:href|action|src|poster|data-url|formaction)=)'
+    r'(?P<attr>\b(?:href|action|src|poster|data-url|data-src|data-stream|formaction)=)'
     r'(?P<quote>["\']?)/(?!/)')
 #: literal URLs inside JavaScript — ``fetch('/admin/api/…')`` must not jump to
 #: the panel root either, and `<base>` does not help for these.

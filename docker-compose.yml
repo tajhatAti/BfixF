@@ -1,0 +1,41 @@
+# BfixF — bot + website together.  Start with:  docker compose up -d
+#
+# 1. cp config.env.example config.env   এবং তাতে BOT_TOKEN / API_ID / API_HASH /
+#    ADMIN_IDS বসান (নাহলে সাইট চালু হবে “setup” পেজে)।
+# 2. docker compose up -d --build
+# 3. http://localhost:8080/admin — অ্যাডমিন প্যানেল।  বাইরে থেকে দেখাতে চাইলে
+#    config.env-এ শুধু WEB_HOST=0.0.0.0 রাখুন আর ফায়ারওয়ালে 8080 খুলুন।
+services:
+  bfixf:
+    build: .
+    image: bfixf:latest
+    container_name: bfixf
+    restart: unless-stopped
+    env_file:
+      - config.env
+    environment:
+      WEB_HOST: 0.0.0.0
+      PORT: "8080"
+      DB_FILE: /data/bot_data.sqlite3
+      LOG_FILE: /data/logs/bot.log
+      SESSION_STATE_FILE: /data/bot_master.session
+    ports:
+      - "8080:8080"
+    volumes:
+      # ডেটাবেস + session + লগ — শুধু এই ফোল্ডারটাই ব্যাকআপ করলেই যথেষ্ট।
+      - bfixf-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.getenv('PORT','8080')+'/health').read()"]
+      interval: 60s
+      timeout: 8s
+      retries: 3
+      start_period: 25s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bfixf-data:
