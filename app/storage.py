@@ -21,6 +21,23 @@ from app.logger import log
 from app.utils import slugify, unique_keep_order
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS restricted_channels (
+    chat_id INTEGER PRIMARY KEY, admin_id INTEGER NOT NULL UNIQUE,
+    link TEXT DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS restricted_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target INTEGER NOT NULL, request_id INTEGER NOT NULL, admin_id INTEGER NOT NULL,
+    source TEXT NOT NULL, source_msg INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER DEFAULT 0,
+    ready_at REAL DEFAULT 0, last_error TEXT DEFAULT '',
+    UNIQUE(target,request_id)
+);
+CREATE TABLE IF NOT EXISTS restricted_items (
+    job_id INTEGER NOT NULL, source_msg INTEGER NOT NULL, sent_msg INTEGER DEFAULT 0,
+    PRIMARY KEY(job_id,source_msg)
+);
+
 CREATE TABLE IF NOT EXISTS video_copy_lease (
     id INTEGER PRIMARY KEY CHECK(id=1),
     owner TEXT NOT NULL,

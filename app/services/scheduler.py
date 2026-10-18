@@ -315,7 +315,8 @@ async def mirror_loop() -> None:
     await asyncio.sleep(45)                       # let the bot settle after boot
     while True:
         try:
-            from app.services import video_copy
+            from app.services import video_copy, restricted
+            restricted.kick()
             video_copy.kick()
             if not db.missing_mirrors(1):
                 await asyncio.sleep(20)

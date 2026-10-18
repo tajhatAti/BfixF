@@ -159,7 +159,7 @@ async def _copy(item: dict) -> None:
                  str(exc)[:500], store_id, file_id))
     finally:
         # This paces every slot, not just the task that finished last.
-        await asyncio.sleep(max(3, min(30, settings.get_int('VIDEO_COPY_DELAY', 4))))
+        await asyncio.sleep(max(0, min(30, settings.get_int('VIDEO_COPY_DELAY', 0))))
 
 
 def _claim() -> bool:
@@ -188,6 +188,12 @@ async def _run_owned(bound) -> None:
     db._run("UPDATE video_copy_items SET state='pending' WHERE state='running'")
     while True:
         if db.impl is not bound or not _claim():
+            return
+        # An explicit post request gets a turn between store-copy batches.
+        if any(r['admin_id'] in runtime.user_clients for r in db._q(
+                "SELECT j.admin_id FROM restricted_jobs j JOIN restricted_channels c "
+                "ON c.chat_id=j.target WHERE j.state='pending' AND j.ready_at<=? AND c.enabled=1",
+                (time.time(),))):
             return
         db._run("UPDATE video_copy_items SET state='failed',last_error='ফাইলটি আর এই স্টোরে নেই' "
                 "WHERE state IN ('pending','running') AND NOT EXISTS "

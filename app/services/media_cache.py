@@ -37,14 +37,14 @@ from telethon.errors import FloodWaitError
 
 from app import runtime
 from app.logger import log
-from app.services import peers, settings
+from app.services import peers, settings, native_media
 from app.services.telegram import safe_call
 from app.services.textclean import clean_text
 from app.storage import db
 
 CHUNK = 1024 * 1024
 MAX_RANGED_THREADS = 4
-_reserved_downloads: dict[int, int] = {}
+_reserved_downloads: dict[object, int] = {}
 
 
 def _owner_session(file_row: dict, store: dict | None):
@@ -642,7 +642,7 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
 
     # 3. …otherwise download and re-upload (works for restricted/forward-protected).
     tmp = tempfile.NamedTemporaryFile(delete=False, prefix="bfixf-copy-",
-                                      suffix=".mp4" if file_row.get("kind") == "Video" else ".bin")
+                                      suffix=native_media.extension(source, file_row.get("kind") or ""))
     thumb_path = None
     tmp.close()
     try:
@@ -664,7 +664,7 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
             except OSError as exc:
                 log.debug("caching the downloaded mirror failed: %s", exc)
         # Preserve the source's duration, dimensions and filename attributes.
-        attributes = getattr(getattr(source, "document", None), "attributes", None)
+        upload_options = native_media.upload_options(source, file_row.get("kind") or "")
         try:
             thumb_file = tempfile.NamedTemporaryFile(delete=False, prefix="bfixf-copy-", suffix=".jpg")
             thumb_path = thumb_file.name
@@ -686,8 +686,7 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
         sent = await safe_call(
             client.send_file, peer, tmp.name,
             caption=clean_text(file_row.get("name") or "")[:200],
-            supports_streaming=file_row.get("kind") == "Video",
-            attributes=attributes, thumb=thumb_path, force_document=False,
+            thumb=thumb_path, **upload_options,
             what="mirror_upload", retries=1,
         )
         if sent is not None and getattr(sent, "media", None):

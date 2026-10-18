@@ -262,6 +262,10 @@ Public page-এ কোনো management/admin link দেখানো হয় 
 
 ### স্ক্যানের পর ভিডিও কপি
 
-`VIDEO_COPY_DELAY=4` — প্রতি কপি-slot-এর বিরতি, কার্যকর সীমা ৩–৩০ সেকেন্ড। সর্বোচ্চ তিনটি ফাইল একসঙ্গে। `MIRROR_MAX_MB` আগের মতো ফাইলের সর্বোচ্চ সীমা। আর্কাইভ সবসময় স্টোরের আলাদা private cache channel ব্যবহার করে; সাধারণ `STORAGE_CHANNEL` override কপিগুলো এক চ্যানেলে মিশিয়ে দেয় না।
+`VIDEO_COPY_DELAY=0` — প্রতি কপি-slot-এর অতিরিক্ত বিরতি, কার্যকর সীমা ০–৩০ সেকেন্ড। সর্বোচ্চ তিনটি ফাইল একসঙ্গে। `MIRROR_MAX_MB` আগের মতো ফাইলের সর্বোচ্চ সীমা। আর্কাইভ সবসময় স্টোরের আলাদা private cache channel ব্যবহার করে; সাধারণ `STORAGE_CHANNEL` override কপিগুলো এক চ্যানেলে মিশিয়ে দেয় না।
 
 কপি প্রগ্রেস `video_copy_jobs`/`video_copy_items` টেবিলে থাকে; পূর্ণ `.bfixf.gz` ব্যাকআপে অন্তর্ভুক্ত। ক্যাশ চ্যানেলের পোস্ট অক্ষত থাকে; কপি worker-এর অস্থায়ী download/thumbnail কাজ শেষে মুছে যায়।
+
+### Restricted download
+
+বটে `/restricted on` থেকে তৈরি admin-owned channel-এর registry ও post queue ডেটাবেজে থাকে; token/session নতুন করে দেওয়া লাগে না। কপি পাঠাতে ওই মালিকের user session-ই ব্যবহার হয়। এই আলাদা channel-এর forwarding enabled; সাধারণ store/source protection পরিবর্তন হয় না। `/restricted off` ও `/restricted retry` চালু/বন্ধ এবং ব্যর্থ post-এর checkpoint-aware retry দেয়।

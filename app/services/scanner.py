@@ -1,4 +1,4 @@
-"""Channel scanning: pull every photo/video out of a channel into a store.
+"""Channel scanning: pull only videos out of a channel into a store.
 
 Two modes:
 * **session** — uses the admin's userbot (works for channels the bot cannot see)
@@ -34,10 +34,10 @@ def start_scan(admin_id: int) -> None:
 
 
 def _kind_of(message) -> str | None:
-    """Same strict rule as manual uploads: video + photo only, nothing else."""
+    """Scanning is video-only; manual uploads keep their separate policy."""
     from app.services.media_guard import classify
     kind, _reason = classify(message)
-    return kind
+    return kind if kind == "Video" else None
 
 
 def _store_message(store_id: int, title: str, chat_id: int, message, index: int) -> bool:
@@ -114,16 +114,19 @@ async def scan_with_session(admin_id: int, chat_id: int, title: str, store_id: i
         raise RuntimeError("এই সেশনের অ্যাকাউন্ট দিয়ে চ্যানেলটি খোলা যাচ্ছে না। "
                            "চ্যানেলে জয়েন করুন, তারপর সেশন দিয়ে আবার চ্যানেল বাছুন।") from exc
     chat_id = utils.get_peer_id(entity)
-    iterator = client.iter_messages(entity, limit=None, reverse=True)
+    from telethon.tl.types import InputMessagesFilterVideo
+    iterator = client.iter_messages(entity, limit=None, reverse=True, filter=InputMessagesFilterVideo)
     return await _run(admin_id, iterator, title, chat_id, store_id, progress, archive=True)
 
 
 async def scan_with_bot(admin_id: int, entity, title: str, store_id: int,
                         progress: ProgressCb | None = None) -> dict:
-    chat_id = entity.id
+    from telethon import utils
+    from telethon.tl.types import InputMessagesFilterVideo
+    chat_id = utils.get_peer_id(entity)
     db.add_bot_chat(chat_id, title)
-    iterator = bot.iter_messages(entity, limit=None, reverse=True)
-    return await _run(admin_id, iterator, title, chat_id, store_id, progress)
+    iterator = bot.iter_messages(entity, limit=None, reverse=True, filter=InputMessagesFilterVideo)
+    return await _run(admin_id, iterator, title, chat_id, store_id, progress, archive=True)
 
 
 async def list_dialogs(admin_id: int) -> list[tuple[int, str]]:

@@ -247,7 +247,9 @@ async def test_restricted_fallback_preserves_metadata_and_cleans_files(clean, mo
         result = await media_cache.ensure_mirror(db.file(file_id), clean, archive=True)
         assert bool(result.get('mirror_msg')) is not fail
     assert client.events == ['forward', 'download', 'thumb', 'upload']
-    assert client.upload['attributes'] == client.attrs
+    assert all(attr in client.upload['attributes'] for attr in client.attrs)
+    assert client.upload['mime_type'] == 'video/mp4'
+    assert client.upload['force_document'] is False
     assert client.upload['supports_streaming'] is True
     assert all(not Path(p).exists() for p in client.paths)
     assert not media_cache._reserved_downloads

@@ -57,6 +57,7 @@ def admin_panel(admin_id: int, active_store_name: str | None, session_ok: bool,
         Button.inline("👁 User view", "adm:prev"),
         Button.inline("🆘 Help", "adm:help"),
     ])
+    rows.append([Button.inline("📥 Restricted download", "rdl:home")])
     return rows
 
 def admin_stores_menu(stores: list[dict], active_id: int | None) -> list[list[Button]]:

@@ -1,10 +1,29 @@
+## শুধু ভিডিও স্ক্যান + Restricted download
+
+- সেশন ও bot scan দুটিতেই Telegram video filter এবং ভিডিও-only যাচাই। ছবি/ডকুমেন্ট স্ক্যানে নতুন করে ঢুকবে না; manual upload-এর আলাদা নীতি অপরিবর্তিত। Bot scan-এর ভিডিওও store archive queue-তে যায় (copy করতে মালিকের সেশন লাগবে)।
+- নতুন ভিডিও upload-এ `video/*` MIME, সঠিক extension/filename, `DocumentAttributeVideo`, duration/dimensions এবং `supports_streaming=True`, `force_document=False`। পুরোনো source filename `.bin` নতুন upload-এ বহন করা হয় না। এটি arbitrary ফাইলকে rename করে ভিডিও বানানো বা transcode করা নয়; source ভিডিওর সঠিক format/attributes বহন করা। Internal web byte-cache-এর `.bin` নাম Telegram upload-এর filename নয়।
+- দ্রুত ৩টি transfer একসঙ্গে; ইচ্ছাকৃত default cooldown নেই। আগে নিজে `VIDEO_COPY_DELAY` সেভ করে থাকলে Emergency settings থেকে ০ করুন। Telegram FloodWait, disk/size limits সবসময় কার্যকর—অসীম download speed দাবি নয়।
+
+### বট থেকে ব্যবহার
+
+1. `/session` দিয়ে নিজের সেশন কানেক্ট করুন। Admin panel → **📥 Restricted download**, অথবা `/restricted`।
+2. **চ্যানেল তৈরি / চালু** বাটন বা `/restricted on` দিন। নিজের সেশন আলাদা private broadcast channel বানাবে এবং বটকে admin করবে। চ্যানেলের লিংক বটেই পাবেন।
+3. **ওই চ্যানেলে** একটি পোস্টের পুরো লিংক পাঠান: `https://t.me/channel/123` বা `https://t.me/c/1234567890/123`। User session-কে সোর্সে আগে থেকেই বৈধ অ্যাক্সেস থাকতে হবে; invite-only/inaccessible উৎস নিজে থেকে খোলা হয় না।
+4. একক পোস্ট বা album-এর ছবি/ভিডিও/ডাউনলোডযোগ্য document সেখানে **ক্যাপশন ছাড়া** আবার upload হবে। Album-এর মাঝের media-র লিংকও সমর্থিত। Media আলাদা native photo/video message হিসেবে আসতে পারে; album grouping হুবহু রাখা হচ্ছে না।
+5. **এই আলাদা চ্যানেলের কপি forward করা যাবে**। পুরোনো store/source channel-এর protection এবং কোনো পুরোনো প্রকাশিত পোস্ট বদলানো হয় না।
+6. `/restricted off` নতুন কাজ থামাবে; in-flight upload শেষ হতে পারে। `/restricted retry` বা retry বাটন ব্যর্থ পোস্টের অসম্পন্ন media চালাবে—checkpoint থাকা সফল media আর upload হবে না।
+
+শুধু registered admin-created broadcast channel-এর link গ্রহণ করা হয়; user-sender হলে admin অনুমতি পরীক্ষা হয়। প্রতিটি Telegram update একবার queue হয়। Queue/checkpoint/channel registry পূর্ণ database backup-এ থাকে। Restart-এ main scheduler কাজ ফেরায়; store-copy ও এই downloader একই SQLite lease ব্যবহার করে, মিলিয়ে সর্বোচ্চ ৩টি transfer। সফল/ব্যর্থ/বাতিল transfer-এর temp folder মুছে যায় (SIGKILL/power loss-এ cleanup চালানো সম্ভব নয়)।
+
+এই আপডেটের পরীক্ষা: নিচের test suite offline/mocked Telegram দিয়ে চালানো হয়েছে; production session দিয়ে actual download/upload ও client playback আলাদাভাবে যাচাই করতে হবে। নতুন কোড deploy/restart করুন (`python run.py`)।
+
 ## স্ক্যান → স্বয়ংক্রিয় ভিডিও আর্কাইভ
 
 `Promt.py` / `protm.py`-এর নির্দেশনা এবং `DownloadRestricted-example.py`-এর download/upload লজিক বর্তমান সিস্টেমে যুক্ত হয়েছে; উদাহরণের আলাদা ওয়েবসাইট বা hardcoded credentials ব্যবহার করা হয় না।
 
-1. নিজের সংযুক্ত Telegram সেশন দিয়ে স্টোরে চ্যানেল স্ক্যান করুন। শেষ হলে ওই সোর্সের **শুধু ভিডিও** কপি-জবে যোগ হবে; ছবিও স্টোরে থাকতে পারে, কিন্তু আর্কাইভ জবে যাবে না। একই সোর্স পুনরায় স্ক্যান করলেও অসম্পন্ন কাজ যোগ হয়, সম্পন্ন কাজ রিসেট হয় না।
+1. নিজের সংযুক্ত Telegram সেশন দিয়ে স্টোরে চ্যানেল স্ক্যান করুন। শেষ হলে ওই সোর্সের **শুধু ভিডিও** কপি-জবে যোগ হবে; স্ক্যানের সময় ছবি/অন্য ফাইল যোগ হবে না; আগের প্রকাশিত কনটেন্ট মুছবে না। একই সোর্স পুনরায় স্ক্যান করলেও অসম্পন্ন কাজ যোগ হয়, সম্পন্ন কাজ রিসেট হয় না।
 2. স্টোরের নিজস্ব প্রাইভেট ক্যাশ চ্যানেল তৈরি/পুনর্ব্যবহার হবে। পুরোনো shared cache বা source-as-mirror-কে আলাদা স্টোর আর্কাইভ ধরা হয় না। প্রথমে Telegram forward; ব্যর্থ হলে সেশন দিয়ে download → upload, ভিডিও attributes ও thumbnail রাখা হয়। সোর্সের আইডি/প্রকাশিত লিংক বদলায় না।
-3. সর্বোচ্চ **৩টি ভিডিও একসঙ্গে**, পুরোনো মেসেজ আগে; প্রতি slot-এ ডিফল্ট ৪ সেকেন্ড বিরতি (`VIDEO_COPY_DELAY`, ৩–৩০ সেকেন্ড)। FloodWait-এ Telegram-এর অপেক্ষা মেনে চলে; দীর্ঘ FloodWait-এর deadline ডেটাবেজে থাকে, চেষ্টা নষ্ট হয় না। অন্য ব্যর্থতায় সর্বোচ্চ ৩ চেষ্টা, তারপর পরের ফাইল।
+3. সর্বোচ্চ **৩টি ভিডিও একসঙ্গে**, পুরোনো মেসেজ আগে; প্রতি slot-এ ডিফল্ট অতিরিক্ত বিরতি নেই (`VIDEO_COPY_DELAY=0`, ০–৩০ সেকেন্ড)। FloodWait-এ Telegram-এর অপেক্ষা মেনে চলে; দীর্ঘ FloodWait-এর deadline ডেটাবেজে থাকে, চেষ্টা নষ্ট হয় না। অন্য ব্যর্থতায় সর্বোচ্চ ৩ চেষ্টা, তারপর পরের ফাইল।
 4. আপলোড সফল/ব্যর্থ/বাতিল—সব পথেই অস্থায়ী ভিডিও ও thumbnail মুছে যায়; চ্যানেলের কপি মুছে যায় না। আর্কাইভ worker ওয়েব byte-cache তৈরি করে না। আগে ফাঁকা ডিস্ক ও `MIRROR_MAX_MB` পরীক্ষা করে; একসঙ্গে চলা download-এর জন্য ডিস্ক reservation থাকে। পাওয়ার-লস/প্রসেসে SIGKILL হলে `finally` চালানো সম্ভব নয়—হোস্টের অস্থায়ী ফাইল রয়ে যেতে পারে।
 5. বটে অগ্রগতি মেসেজ (দীর্ঘ কাজে প্রায় ২০ সেকেন্ড পরপর), Pause/Resume/Stop/ব্যর্থগুলো আবার। `/admin/channels`-এ একই নিয়ন্ত্রণ, অগ্রগতি ও বিস্তারিত ত্রুটি। Pause/Stop দিলে নতুন ফাইল শুরু হবে না; সর্বোচ্চ ৩টি চলমান আপলোড শেষ হতে পারে।
 6. job/items/checkpoint SQLite-এ এবং পূর্ণ ব্যাকআপে থাকে। রিস্টার্টে main scheduler নিজে থেকে অসম্পন্ন কাজ চালায়; paused/stopped অবস্থাও থাকে। আলাদা বট থেকে স্ক্যান করলেও কাজ main worker-ই করে। SQLite lease একাধিক process-কে একইসঙ্গে worker চালাতে বাধা দেয়; crash-এর পর lease expire হতে সর্বোচ্চ প্রায় ২ মিনিট লাগে।

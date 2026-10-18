@@ -29,7 +29,7 @@ from app.services import credentials, secrets_guard
 from app.storage import db
 
 HANDLER_MODULES = ("app.handlers.peers", "app.handlers.guard", "app.handlers.portable",
-                   "app.handlers.bots", "app.handlers.br",
+                   "app.handlers.restricted", "app.handlers.bots", "app.handlers.br",
                    "app.handlers.reel", "app.handlers.admin", "app.handlers.billing",
                    "app.handlers.extras", "app.handlers.inline", "app.handlers.linkpanel",
                    "app.handlers.manage", "app.handlers.messages", "app.handlers.panel_v3",
