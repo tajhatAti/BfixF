@@ -102,6 +102,9 @@ REGISTRY: list[Group] = [
         blurb="ইউজার ফাইল পেতে আগে চ্যানেলে জয়েন করতে হবে। প্রাইভেট ইনভাইট লিংক, "
               "@username বা চ্যানেল আইডি — যেকোনোটা চলবে।",
         settings=[
+            _s("GROUP_PROMO_ENABLED", "গ্রুপে /start দিলে ফ্রি ভিডিও", "force_join", kind="bool", default=True),
+            _s("GROUP_PROMO_COOLDOWN", "একই গ্রুপে ভিডিওর বিরতি (সেকেন্ড)", "force_join", kind="int", default=60),
+            _s("GROUP_PROMO_URL", "প্রমোশন বাটনে নিজের গ্রুপের লিংক", "force_join", placeholder="https://t.me/yourgroup"),
             _s("FORCE_JOIN_ENABLED", "জয়েন বাধ্যতামূলক", "force_join", kind="bool",
                default=True, hint="বন্ধ করলে কেউ আটকাবে না"),
             _s("FORCE_CHANNEL", "চ্যানেল (লিংক / @username / আইডি)", "force_join",

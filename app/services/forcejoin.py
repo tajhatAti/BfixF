@@ -14,9 +14,8 @@ Resolution order: the bot itself, then any connected userbot session (needed
 because *bots* cannot always open a private invite link — a user account can).
 Everything is cached in `meta` so the membership check stays fast.
 
-Safety rule that never changes: if we cannot verify membership (wrong link, bot
-not in the channel, Telegram hiccup) we let the user through. Locking paying
-customers out of a whole store is far worse than skipping one gate.
+Required membership fails closed: missing permissions or a Telegram outage must
+never silently bypass the configured gate. Technical failures go to the owner.
 """
 from __future__ import annotations
 
@@ -215,7 +214,7 @@ async def ensure_invite_link() -> str:
 
 
 async def is_member(user_id: int) -> bool | None:
-    """True = joined, False = not joined, None = could not check (fail open)."""
+    """True = joined, False = not joined, None = could not check (must not bypass gate)."""
     from telethon.errors import UserNotParticipantError
     from telethon.tl.functions.channels import GetParticipantRequest
 
@@ -230,9 +229,15 @@ async def is_member(user_id: int) -> bool | None:
         log.debug("force-join: channel not resolved — skipping the gate")
         return None
     try:
-        await safe_call(client(GetParticipantRequest(channel=peer, user_id=user_id)),
-                        what="force_join", retries=1, raise_after_retries=False)
-        return True
+        result = await safe_call(client, GetParticipantRequest(channel=peer, participant=user_id),
+                        what="force_join", retries=1, raise_after_retries=True)
+        from telethon.tl.types import ChannelParticipantLeft, ChannelParticipantBanned
+        participant = getattr(result, "participant", None)
+        if participant is None:
+            return None
+        if isinstance(participant, ChannelParticipantBanned):
+            return not (participant.left or getattr(participant.banned_rights, 'view_messages', False))
+        return not isinstance(participant, ChannelParticipantLeft)
     except UserNotParticipantError:
         return False
     except Exception as exc:
@@ -312,6 +317,8 @@ def store_targets(store_id: int | None) -> list[dict]:
 
 
 def targets(store_id: int | None = None) -> list[dict]:
+    if not settings.get_bool("FORCE_JOIN_ENABLED", True):
+        return []
     return global_targets() + store_targets(store_id)
 
 
@@ -350,23 +357,27 @@ async def check_many(user_id: int, store_id: int | None = None) -> dict:
     """Which of the channels for this store is the user still missing?
 
     Returns {ok, missing: [...], skipped: int, checked: int}. Anything we cannot
-    verify is skipped, so a Telegram hiccup never blocks a paying customer.
+    verify is marked unverified and blocked until it can be checked.
     """
     groups = targets(store_id)
     if not groups:
         return {"ok": True, "missing": [], "skipped": 0, "checked": 0}
     client = runtime.get_client()
     if client is None:
-        return {"ok": True, "missing": [], "skipped": len(groups), "checked": 0}
+        return {"ok": False, "missing": [{**t, "unverified": True} for t in groups], "skipped": len(groups), "checked": 0}
     missing, skipped, checked = [], 0, 0
     for target in groups:
         info = await ensure_target(target)
         if not info.get("ok"):
             skipped += 1
+            missing.append({**target, "unverified": True})
+            log.warning('Cannot verify required join target %s; check bot admin permissions', target.get('ref'))
             continue
         answer = await _member_of(client, info.get("chat_id"), user_id)
         if answer is None:
             skipped += 1
+            missing.append({**info, "unverified": True})
+            log.warning('Cannot verify membership for required channel %s', info.get('ref'))
             continue
         checked += 1
         if answer is False:
@@ -380,9 +391,15 @@ async def _member_of(client, chat_id, user_id: int) -> bool | None:
     if not chat_id:
         return None
     try:
-        await safe_call(client(GetParticipantRequest(channel=chat_id, user_id=user_id)),
-                        what="force_join", retries=1, raise_after_retries=False)
-        return True
+        result = await safe_call(client, GetParticipantRequest(channel=chat_id, participant=user_id),
+                        what="force_join", retries=1, raise_after_retries=True)
+        from telethon.tl.types import ChannelParticipantLeft, ChannelParticipantBanned
+        participant = getattr(result, "participant", None)
+        if participant is None:
+            return None
+        if isinstance(participant, ChannelParticipantBanned):
+            return not (participant.left or getattr(participant.banned_rights, 'view_messages', False))
+        return not isinstance(participant, ChannelParticipantLeft)
     except UserNotParticipantError:
         return False
     except Exception as exc:
@@ -432,6 +449,8 @@ def gate_text(missing: list[dict], variant: str = "fresh") -> str:      # noqa: 
                 "“আমি জয়েন করেছি” চাপুন:\n" + channels) if variant == "again" else \
                ("🔐 <b>ফাইলটি পেতে আগে চ্যানেল জয়েন করুন</b>\n\n"
                 "একবার জয়েন করলেই সব ভিডিও/ফাইল পাবেন:\n" + channels)
+    if any(t.get('unverified') for t in missing):
+        tail += '\n\n⏳ সদস্যপদ যাচাই করা যাচ্ছে না। একটু পরে আবার পরীক্ষা করুন।'
     return body + tail
 
 

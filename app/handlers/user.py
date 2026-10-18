@@ -254,7 +254,7 @@ async def cancel_handler(event: events.NewMessage.Event) -> None:
 @route("hp")
 async def help_button(event, _rest: str) -> None:
     from app.services.command_catalog import help_pages
-    text = help_pages(access.is_admin(event.sender_id))[0]
+    text = 'কমান্ডের তালিকা দেখতে /help লিখুন।' if access.is_admin(event.sender_id) else texts.HELP_TEXT
     if access.is_admin(event.sender_id):
         text += "\n/help — সম্পূর্ণ তালিকা"
     await ui.render(event, text, [[Button.inline("🔙 Back", "bs:0")]], edit=True)
@@ -459,7 +459,7 @@ async def reply_menu_buttons(event) -> None:
         return
     if label == texts.REPLY_HELP:
         from app.services.command_catalog import help_pages
-        text = help_pages(access.is_admin(user_id))[0]
+        text = 'কমান্ডের তালিকা দেখতে /help লিখুন।' if access.is_admin(user_id) else texts.HELP_TEXT
         if access.is_admin(user_id):
             text += "\n/help — সম্পূর্ণ তালিকা"
         await event.respond(text,

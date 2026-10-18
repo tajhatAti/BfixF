@@ -380,8 +380,7 @@ ADMIN_QUICK = (
     ("👣", "Visitors (live)", "/admin/visitors", "এখন কে অনলাইনে, কোথা থেকে, কী দেখছে"),
 )
 
-# Two separate looks. Visitors: minimal black + gold. Admin / setup / sign-in: light paper
-# workspace with a floating black sidebar and the same gold accent.
+# Shared black/yellow palette for public pages, setup and the admin workspace.
 PUBLIC_THEME_CSS = """
  :root { color-scheme:dark; --bg:#0b0b0d; --surface:#141417; --surface-2:#1a1a1e; --ink:#f3efe6; --muted:#9d988c;
    --line:#232328; --line-strong:#33333a; --accent:#c9a45c; --accent-dark:#dcb978; --accent-soft:#1d1810;
@@ -611,7 +610,7 @@ _FEED_JS = """<script>(function(){
     load(slide);
     if (!v || reduce) return;
     v.muted = muted;
-    var p = v.play();
+    var p = window.bfixfPlay(v);
     if (p && p.catch) p.catch(function(){});
     slide.classList.add('playing');
     if (v.dataset.counted !== '1') {
@@ -638,8 +637,8 @@ _FEED_JS = """<script>(function(){
     if (reduce) return;
     if (slide && slide.classList.contains('failed')) return;   // the visitor decides
     var v = slide.querySelector('video');
-    var wait = v ? 9000 : 5000;
-    advance = setTimeout(function(){ go(current + 1); }, wait);
+    if (v) return;  // only an ended video advances; never skip a stalled/blocked clip
+    advance = setTimeout(function(){ go(current + 1); }, 5000);
   }
   function go(index) {
     if (!slides.length) return;
@@ -675,7 +674,7 @@ _FEED_JS = """<script>(function(){
     if (v) {
       v.addEventListener('click', function(ev){
         ev.preventDefault(); ev.stopPropagation();
-        if (v.paused) { v.play().catch(function(){}); slide.classList.add('playing'); }
+        if (v.paused) { window.bfixfPlay(v); slide.classList.add('playing'); }
         else { v.pause(); slide.classList.remove('playing'); }
       });
       v.addEventListener('ended', function(){ go(index + 1); });
@@ -691,12 +690,12 @@ _FEED_JS = """<script>(function(){
         v.style.display = '';
         window.bfixfPrepare(slide.dataset.stream || v.dataset.src || v.getAttribute('src'), function(j){
           if (j && j.ok) {
-            slide.dataset.asked = '';
+            slide.dataset.asked = '1';
             v.style.display = '';
             v.dataset.loaded = '';
             v.setAttribute('src', window.bfixfFresh(slide.dataset.stream || v.getAttribute('src')));
             v.load();
-            var p2 = v.play(); if (p2 && p2.catch) p2.catch(function(){});
+            var p2 = window.bfixfPlay(v); if (p2 && p2.catch) p2.catch(function(){});
             slide.classList.remove('failed');
             return;
           }
@@ -721,7 +720,7 @@ _FEED_JS = """<script>(function(){
       if (ev.key === 'ArrowDown') { ev.preventDefault(); go(current + 1); }
       if (ev.key === 'ArrowUp') { ev.preventDefault(); go(current - 1); }
       if (ev.key === ' ') { ev.preventDefault(); var pv = slide.querySelector('video');
-                            if (pv) { pv.paused ? pv.play().catch(function(){}) : pv.pause(); } }
+                            if (pv) { pv.paused ? window.bfixfPlay(pv) : pv.pause(); } }
     });
     slide.addEventListener('touchstart', function(ev){
       slide.dataset.y = ev.touches[0].clientY;
@@ -742,7 +741,7 @@ _FEED_JS = """<script>(function(){
     ev.preventDefault(); ev.stopPropagation();
     var v = slides[current] && slides[current].querySelector('video');
     if (!v) return;
-    if (v.paused) { v.play().catch(function(){}); pp.textContent = '⏸'; }
+    if (v.paused) { window.bfixfPlay(v); pp.textContent = '⏸'; }
     else { v.pause(); pp.textContent = '▶'; }
   });
   document.addEventListener('visibilitychange', function(){
@@ -766,6 +765,32 @@ _PLAYER_HELPER_JS = """<script>window.bfixfPrepare = function(url, cb){
     .then(function(r){ return r.json(); })
     .then(function(j){ cb(j || {ok:false, reason:''}); })
     .catch(function(){ cb({ok:false, reason:'সার্ভারে যোগাযোগ করা যাচ্ছে না'}); });
+};
+window.bfixfPlay = function(video){
+  if (!video) return Promise.resolve(false);
+  video.playsInline = true;
+  var promise;
+  try { promise = video.play(); } catch (e) { promise = Promise.reject(e); }
+  return Promise.resolve(promise).then(function(){
+    var old = video.parentElement && video.parentElement.querySelector('.play-prompt');
+    if (old) old.remove();
+    return true;
+  }).catch(function(error){
+    if (error && error.name === 'AbortError') return false;
+    var parent = video.parentElement;
+    if (!parent) return false;
+    var prompt = parent.querySelector('.play-prompt');
+    if (!prompt) {
+      prompt = document.createElement('button'); prompt.type = 'button';
+      prompt.className = 'play-prompt'; parent.appendChild(prompt);
+      prompt.addEventListener('click', function(event){
+        event.preventDefault(); event.stopPropagation(); video.muted = true;
+        window.bfixfPlay(video);
+      });
+    }
+    prompt.textContent = error && error.name === 'NotAllowedError' ? '▶ ট্যাপ করে চালান' : '▶ আবার প্লে করুন';
+    return false;
+  });
 };
 window.bfixfFresh = function(url){ return (url || '').split('?')[0] + '?r=' + Date.now(); };
 </script>"""
@@ -845,7 +870,7 @@ _WALL_JS = """<script>(function(){
     if (!v || !autoplay) return;
     v.muted = wall.dataset.muted !== '0';
     v.loop = wall.dataset.loop !== '0';
-    var p = v.play();
+    var p = window.bfixfPlay(v);
     if (p && p.catch) p.catch(function(){});
   }
   function stop(cell){ var v = cell.querySelector('video'); if (v) v.pause(); }
@@ -905,7 +930,7 @@ _WALL_JS = """<script>(function(){
         var v = cell.querySelector('video');
         if (!v) return;
         ev.preventDefault();
-        if (v.paused) { v.muted = wall.dataset.muted !== '0'; v.play().catch(function(){}); }
+        if (v.paused) { v.muted = wall.dataset.muted !== '0'; window.bfixfPlay(v); }
         else v.pause();
       });
       var v = cell.querySelector('video');
@@ -991,6 +1016,24 @@ def _feed_wall_section(bots: str) -> str:
             '<p class="awall-note">নিজে থেকেই চলছে (মিউট) · যেকোনো একটা ট্যাপ করলে '
             'প্লে/পজ · 📱 মোবাইল ডেটা বাঁচাতে ছবিগুলো স্ক্রল করলেই লোড হয়</p>'
             + _PLAYER_HELPER_JS + _WALL_JS)
+
+PUBLIC_THEME_CSS += """
+:root { --accent:#facc15; --accent-dark:#ffe45c; }
+.status, .burger, details, .share-links code { background:var(--surface); color:var(--ink); }
+.hero, .wiz, .card { background:var(--surface); color:var(--ink); }
+code, pre { background:var(--surface-2); color:var(--accent); }
+.play-prompt { position:absolute; z-index:12; top:45%; left:50%; transform:translate(-50%,-50%);
+  max-width:90%; background:#facc15; color:#111; min-height:48px; padding:12px 20px; }
+@media(max-width:600px) {
+  main { padding:14px; } body { overflow-x:hidden; }
+  .landing, .watch-grid { grid-template-columns:minmax(0,1fr); }
+  header { flex-wrap:wrap; gap:12px; padding:14px; }
+  .top { flex-wrap:wrap; } input, textarea, select { font-size:16px; }
+  button, a.btn { min-height:44px; }
+  .card, .store, .watch-main { min-width:0; overflow-wrap:anywhere; }
+  video { max-width:100%; } .reel { max-height:75svh; }
+}
+"""
 
 
 def _gallery_section(bots: str, limit: int = 12) -> str:
@@ -1587,7 +1630,8 @@ def create_app() -> FastAPI:
             if not size:
                 visitors.note(name="media_failed", file_id=int(row.get("id") or 0),
                               detail=reason[:120])
-            return (size > 0), size, reason
+                log.warning('Public media preparation failed (%s): %s', label, reason)
+            return (size > 0), size, ("" if size else "ভিডিওটি এখন প্রস্তুত করা যায়নি। একটু পরে আবার চেষ্টা করুন।")
 
     @app.get("/media/{file_id}/prepare")
     async def feed_prepare(request: Request, file_id: int):
@@ -1777,7 +1821,7 @@ def create_app() -> FastAPI:
                 hero.replaceWith(img);
               }} else if (hero.tagName === 'VIDEO') {{
                 hero.src = stream; hero.poster = tile.dataset.thumb || '';
-                hero.play().catch(function(){{}});
+                window.bfixfPlay(hero);
               }} else {{
                 var video = document.createElement('video');
                 video.id = 'hero-media'; video.controls = true;
@@ -1785,7 +1829,7 @@ def create_app() -> FastAPI:
                 video.loop = {str(play["loop"]).lower()};
                 video.playsInline = true;
                 video.poster = tile.dataset.thumb || ''; video.src = stream;
-                hero.replaceWith(video); video.play().catch(function(){{}});
+                hero.replaceWith(video); window.bfixfPlay(video);
               }}
               var title = document.getElementById('watch-title');
               if (title) title.textContent = tile.querySelector('.tag').textContent;
@@ -1825,7 +1869,7 @@ def create_app() -> FastAPI:
                 if (j && j.ok) {{
                   hero.src = window.bfixfFresh(stream);
                   hero.load();
-                  var p = hero.play(); if (p && p.catch) p.catch(function(){{}});
+                  var p = window.bfixfPlay(hero); if (p && p.catch) p.catch(function(){{}});
                   say('');
                 }} else {{
                   say('😕 ' + ((j && j.reason) || 'এই মুহূর্তে চালানো যাচ্ছে না'));

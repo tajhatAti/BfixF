@@ -3,7 +3,7 @@ from importlib import import_module
 
 HANDLER_MODULES = (
     'app.handlers.commands', 'app.handlers.peers', 'app.handlers.guard',
-    'app.handlers.portable', 'app.handlers.restricted', 'app.handlers.bots',
+    'app.handlers.join_gate', 'app.handlers.groups', 'app.handlers.portable', 'app.handlers.restricted', 'app.handlers.bots',
     'app.handlers.br', 'app.handlers.reel', 'app.handlers.admin',
     'app.handlers.billing', 'app.handlers.extras', 'app.handlers.inline',
     'app.handlers.linkpanel', 'app.handlers.manage', 'app.handlers.messages',

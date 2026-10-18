@@ -109,7 +109,7 @@ async def admin_error_notifier(text: str) -> None:
     for admin_id in cfg.ADMIN_IDS[:1]:  # technical diagnostics belong to the owner
         try:
             await asyncio.wait_for(client.send_message(
-                admin_id, f"⚠️ <b>বটের ত্রুটি — শুধু মালিকের জন্য</b>\n<pre>{esc(redact(text)[:3000])}</pre>"), timeout=10)
+                admin_id, f"⚠️ <b>বটের সতর্কতা</b>\n{esc(redact(text).splitlines()[0][:240])}\nবিস্তারিত ব্যক্তিগত error inbox-এ সেভ হয়েছে।"), timeout=10)
         except Exception:
             pass
 

@@ -46,23 +46,25 @@ def buttons_of(link: dict | None):
 async def missing_channels(user_id: int, token: str) -> list[dict]:
     """Channels of this link the user has not joined yet.
 
-    A channel we cannot verify (Telegram hiccup, bot removed) never blocks the
-    user — locking people out by accident is worse than skipping one gate.
+    Required channels must be positively verified; outages must not bypass them.
     """
     groups = targets(token)
     if not groups:
         return []
     client = runtime.get_client()
     if client is None:
-        return []
+        return [{**target, 'unverified': True} for target in groups]
     missing = []
     for target in groups:
         chat_id = target.get("chat_id")
         if not chat_id:
+            missing.append({**target, 'unverified': True})
             continue
         answer = await forcejoin._member_of(client, chat_id, user_id)
-        if answer is False:
-            missing.append(target)
+        if answer is not True:
+            if answer is None:
+                log.warning('Cannot verify a required link channel: %s', target.get('ref'))
+            missing.append({**target, 'unverified': answer is None})
     return missing
 
 

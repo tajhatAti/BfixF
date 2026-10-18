@@ -110,7 +110,7 @@ async def test_help_escapes_every_pending_prompt_on_new_client(client, prompt):
 @pytest.mark.parametrize('command,expected', [
     ('/downloads', 'লাইভ অবস্থা'), ('/restricted', 'Restricted download'),
     ('/reel', 'রিল'), ('/session@MyDesiBot', 'String Session'),
-    ('/version', 'desi-2026.10.18-command-recovery'), ('/whoami', str(OWNER)),
+    ('/version', 'desi-2026.10.18-group-join-recovery'), ('/whoami', str(OWNER)),
     ('/status', 'Handlers:'), ('/bots', 'বটগুলো'), ('/brhelp', '/brsend'),
 ])
 async def test_commands_really_dispatch_after_cached_imports(client, command, expected):
@@ -229,13 +229,13 @@ async def test_startup_notice_and_private_telegram_menu_scopes(client, monkeypat
             return types.InputPeerUser(uid, 123)
     menu_client = MenuClient()
     await command_catalog.announce_and_install(menu_client)
-    assert 'desi-2026.10.18-command-recovery' in menu_client.messages[0][1]
+    assert 'desi-2026.10.18-group-join-recovery' in menu_client.messages[0][1]
     assert 'MyDesiBot' in menu_client.messages[0][1]
     public = next(r for r in requests if isinstance(r.scope, types.BotCommandScopeDefault))
-    assert [c.command for c in public.commands] == ['start', 'help']
+    assert [c.command for c in public.commands] == ['start']
     private = next(r for r in requests if isinstance(r.scope, types.BotCommandScopePeer))
     assert private.scope.peer.user_id == OWNER
-    assert 'downloads' in [c.command for c in private.commands]
+    assert [c.command for c in private.commands] == ['start']
 
 
 async def test_rejected_search_exposes_no_exception_to_ordinary_user(client, monkeypatch):
@@ -251,3 +251,40 @@ async def test_rejected_search_exposes_no_exception_to_ordinary_user(client, mon
     text = await dispatch(client, event)
     assert 'সাময়িক সমস্যা' in text
     assert 'DATABASE_PASSWORD_SECRET' not in text
+
+
+async def test_private_start_really_stops_at_global_join_gate(client, monkeypatch):
+    from app.services import forcejoin
+    settings.set('FORCE_CHANNEL', '@required_channel')
+    async def target(item):
+        return {**item, 'ok': True, 'chat_id': -100123}
+    async def not_joined(*args):
+        return False
+    monkeypatch.setattr(forcejoin, 'ensure_target', target)
+    monkeypatch.setattr(forcejoin, '_member_of', not_joined)
+    event = Event('/start f123', sender=999)
+    text = await dispatch(client, event)
+    assert 'চ্যানেল' in text
+    assert db.get_meta('join_start:999') == 'f123'
+    assert 'no longer exists' not in text
+
+
+async def test_group_start_really_dispatches_but_ignores_foreign_bot(client, monkeypatch):
+    from app.services import sender
+    store = db.create_store(OWNER, 'Free promotion')
+    db.update_store(store['id'], is_premium=0)
+    file_id = db.add_file(store['id'], 'Video', 'Video', -100, 1)
+    sent = []
+    async def deliver(chat, file, caption_text=None, buttons=None):
+        sent.append((chat, file['id'], caption_text))
+        return sender.Delivery(True)
+    monkeypatch.setattr(sender, 'deliver', deliver)
+    event = Event('/start@OtherBot', sender=999)
+    event.is_group = True
+    event.is_private = False
+    event.chat_id = -100999
+    await dispatch(client, event)
+    assert not sent
+    event.message.message = '/start@MyDesiBot'
+    await dispatch(client, event)
+    assert sent == [(-100999, file_id, '')]

@@ -25,6 +25,7 @@ def redact(value: str) -> str:
         secret = str(getattr(cfg, name, '') or '')
         if secret:
             text = text.replace(secret, '[REDACTED]')
+    text = re.sub(r'(://[^/\s:@]+:)[^@\s/]+(@)', r'\1[REDACTED]\2', text)
     text = re.sub(r'\b\d{6,12}:[A-Za-z0-9_-]{25,}', '[BOT_TOKEN]', text)
     text = re.sub(r'(?<!\w)1[A-Za-z0-9+/=]{200,}', '[SESSION]', text)
     text = re.sub(r'(?i)((?:password|api_hash|session_str|token)\s*[=:]\s*)[^\s,;]+', r'\1[REDACTED]', text)

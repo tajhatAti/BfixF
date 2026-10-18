@@ -272,7 +272,7 @@ async def test_joining_first_then_receiving_the_video(clean, monkeypatch, collec
 
 
 @pytest.mark.asyncio
-async def test_fail_open_when_membership_cannot_be_checked(clean, monkeypatch,
+async def test_fail_closed_when_membership_cannot_be_checked(clean, monkeypatch,
                                                            collected_sends):
     store, file_id = _store_with_video()
     db.set_store_forcejoin(store["id"], "@store_only")
@@ -282,7 +282,8 @@ async def test_fail_open_when_membership_cannot_be_checked(clean, monkeypatch,
 
     monkeypatch.setattr(forcejoin, "check_many", unknown)
     gate = await flow.gate_check(USER_ID, store["id"])
-    assert gate["ok"] is True                            # never lock a buyer out
+    assert gate["ok"] is False
+    assert gate["missing"][0]["unverified"] is True
 
 
 def test_global_and_store_targets_are_merged(clean):

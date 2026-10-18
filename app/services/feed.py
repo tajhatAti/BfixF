@@ -303,7 +303,7 @@ def note_play(key: str) -> None:
 # -------------------------------------------------------------------- reading
 def eligible(row: dict | None) -> bool:
     """A video/photo a visitor may stream: free store, not locked, has a source."""
-    if not row or not enabled():
+    if not row or row.get('locked') or not enabled():
         return False
     if str(row.get("kind") or "") not in WATCHABLE:
         return False
@@ -401,7 +401,9 @@ async def message_for(row: dict):
     key = _key(row)
     hit = _msg_cache.get(key)
     if hit and hit[0] > time.time():
-        return hit[1]
+        source_client = getattr(hit[1], '_client', None)
+        if source_client is None or _connected(source_client):
+            return hit[1]
     for client in clients():
         for chat, msg_id in _sources(row):
             try:
@@ -438,7 +440,8 @@ async def iter_range(msg, start: int, end: int):
     aligned = (start // CHUNK) * CHUNK
     skip = start - aligned
     remaining = end - start + 1
-    async for chunk in bot.iter_download(msg.media, offset=aligned, request_size=CHUNK):
+    client = getattr(msg, '_client', None) or bot
+    async for chunk in client.iter_download(msg.media, offset=aligned, request_size=CHUNK):
         if skip:
             chunk, skip = chunk[skip:], 0
         if len(chunk) > remaining:
@@ -504,7 +507,8 @@ async def thumb_for(row: dict) -> bytes | None:
     data = None
     for thumb in (-1, -2, 0):
         try:
-            data = await bot.download_media(message, file=bytes, thumb=thumb)
+            client = getattr(message, '_client', None) or bot
+            data = await client.download_media(message, file=bytes, thumb=thumb)
         except Exception:
             data = None
         if data:

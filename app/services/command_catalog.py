@@ -67,21 +67,20 @@ async def announce_and_install(client):
                 f'✅ <b>Desi Site বট চালু</b> @{esc(runtime.bot_username)}\n'
                 f'Build: <code>{esc(identity())}</code>\n'
                 f'Handlers: {len(runtime.handler_registrations)}\n'
-                '/help — সব কমান্ড · /downloads — লাইভ কাজ · /status — পরীক্ষা\n'
-                'এই build /version-এ না থাকলে নতুন কোড চলছে না।', link_preview=False), timeout=10)
+                'বট প্রস্তুত।', link_preview=False), timeout=10)
         except Exception:
             log.warning('Startup owner notification could not be delivered')
     try:
         # Delete any legacy global admin command list; users see public help only.
         await asyncio.wait_for(client(functions.bots.SetBotCommandsRequest(
             scope=types.BotCommandScopeDefault(), lang_code='',
-            commands=[types.BotCommand('start', 'শুরু করুন'), types.BotCommand('help', 'সাহায্য')])), timeout=10)
+            commands=[types.BotCommand('start', 'শুরু করুন')])), timeout=10)
         for admin_id in list(cfg.ADMIN_IDS):
             try:
                 peer = await asyncio.wait_for(client.get_input_entity(admin_id), timeout=10)
                 await asyncio.wait_for(client(functions.bots.SetBotCommandsRequest(
                     scope=types.BotCommandScopePeer(peer), lang_code='',
-                    commands=[types.BotCommand(name, desc[:256]) for name, desc in ADMIN_COMMANDS])), timeout=10)
+                    commands=[types.BotCommand('start', 'শুরু করুন')])), timeout=10)
             except Exception:
                 log.warning('Private command menu unavailable for admin %s; /help remains available', admin_id)
     except Exception:

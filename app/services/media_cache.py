@@ -641,7 +641,8 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
                 tracker.phase('forward')
             source_peer = await _resolve_peer(client, int(file_row["chat_id"]))
             copied = await safe_call(client.forward_messages, peer, source.id,
-                                     from_peer=source_peer, what="mirror_forward", retries=1)
+                                     from_peer=source_peer, drop_author=True, drop_media_captions=True,
+                                     what="mirror_forward", retries=1)
             if isinstance(copied, list):
                 copied = copied[0] if copied else None
         else:
@@ -712,7 +713,7 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
             upload_options['progress_callback'] = tracker.callback
         sent = await safe_call(
             client.send_file, peer, tmp.name,
-            caption=clean_text(file_row.get("name") or "")[:200],
+            caption="",
             thumb=thumb_path, **upload_options,
             what="mirror_upload", retries=1,
         )
@@ -809,7 +810,7 @@ async def copy_between_chats(source_chat: int, msg_id: int, target_chat: int,
         return None
     try:
         sent = await safe_call(worker.send_file, target_chat, message.media,
-                               caption=getattr(message, "message", "") or None,
+                               caption="",
                                what="copy_media", retries=1)
         return int(getattr(sent, "id", 0) or 0) if sent else None
     except Exception as exc:

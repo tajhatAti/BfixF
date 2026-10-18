@@ -41,19 +41,23 @@ def log(name: str, user_id: int | None = None, store_id: int | None = None,
         db.log_event(name, user_id=user_id, store_id=store_id, file_id=file_id,
                      ref=ref, detail=detail)
     except Exception as exc:               # analytics must never break delivery
-        log.debug("event log failed (%s): %s", name, exc)
+        from app.logger import log as logger
+        logger.debug("event log failed (%s): %s", name, exc)
 
 
 async def gate_check(user_id: int, store_id: int | None) -> dict:
     """Subscription check for the default channel **and** this store's channels.
 
-    Fail-open rule stays: if Telegram refuses to answer we let the user through.
+    Configured required channels must be positively verified before delivery.
     """
     if access.is_admin(user_id):
         return {"ok": True, "missing": [], "skipped": 0, "checked": 0}
     if not forcejoin.targets(store_id):
         return {"ok": True, "missing": [], "skipped": 0, "checked": 0}
     result = await forcejoin.check_many(user_id, store_id)
+    if result.get("skipped") and not result["missing"]:
+        result = {**result, "ok": False, "missing": [
+            {**target, "unverified": True} for target in forcejoin.targets(store_id)]}
     if result["missing"]:
         return result
     if result["checked"]:

@@ -186,6 +186,7 @@ class ArchiveClient:
 
     async def forward_messages(self, target, msg_id, **kw):
         self.events.append('forward')
+        assert kw['drop_author'] is True and kw['drop_media_captions'] is True
         if not self.forward_ok:
             raise RuntimeError('CHAT_FORWARDS_RESTRICTED')
         return NS(id=42, chat_id=TARGET, media=object())
@@ -199,6 +200,7 @@ class ArchiveClient:
     async def send_file(self, target, path, **kw):
         self.events.append('upload')
         self.upload = kw
+        assert kw['caption'] == ''
         assert Path(path).exists() and Path(kw['thumb']).exists()
         if self.cancel:
             raise asyncio.CancelledError()

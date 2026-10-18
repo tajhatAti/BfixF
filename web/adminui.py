@@ -38,8 +38,8 @@ THEME_CSS = """
   --ink:#faf5dc; --ink-soft:#dfd7b8; --muted:#b6af96; --faint:#918a73;
   --line:#333025; --line-2:#49422c; --line-3:#facc15;
   --accent:#facc15; --accent-ink:#111111;
-  --ok:#0f6b3f; --ok-bg:#eef6f0; --warn:#8a5a00; --warn-bg:#faf5e9;
-  --bad:#a92318; --bad-bg:#fbf0ee;
+  --ok:#a9df91; --ok-bg:#152619; --warn:#facc15; --warn-bg:#2b2512;
+  --bad:#ff9c8f; --bad-bg:#301b18;
   --r:4px; --r-sm:3px; --r-pill:999px;
   --font:"Hind Siliguri","Bricolage Grotesque",system-ui,"Noto Sans Bengali",sans-serif;
   --mono:ui-monospace,SFMono-Regular,Menlo,"Cascadia Mono",monospace;
@@ -191,10 +191,10 @@ table .nowrap { white-space:nowrap; }
 .row form { margin:0; }
 a.btn, button, input[type=submit] { display:inline-flex; align-items:center;
     justify-content:center; gap:7px; min-height:36px; padding:7px 13px;
-    border:1px solid var(--line-3); border-radius:var(--r-sm); background:var(--ink);
-    color:#fff; font:inherit; font-size:12.5px; font-weight:700; line-height:1.3;
+    border:1px solid var(--line-3); border-radius:var(--r-sm); background:var(--accent);
+    color:var(--accent-ink); font:inherit; font-size:12.5px; font-weight:700; line-height:1.3;
     text-decoration:none; cursor:pointer; transition:background .12s,border-color .12s; }
-a.btn:hover, button:hover, input[type=submit]:hover { background:#000; color:#fff; }
+a.btn:hover, button:hover, input[type=submit]:hover { background:#ffe45c; color:#111; }
 a.btn.grey, button.grey { background:var(--surface); color:var(--ink); border-color:var(--line-2); }
 a.btn.grey:hover, button.grey:hover { border-color:var(--ink); background:var(--surface-3); }
 a.btn.ok, button.ok { background:var(--ink); }
@@ -331,7 +331,7 @@ pre { margin:12px 0; padding:12px 14px; background:var(--surface-3);
 .share-links li { display:flex; align-items:center; gap:10px; flex-wrap:wrap;
   padding:8px 0; border-bottom:1px solid var(--line-3); font-size:13px; }
 .share-links li:last-child { border-bottom:0; }
-.share-links code { background:#f4f4f2; border:1px solid var(--line-3); border-radius:6px;
+.share-links code { background:var(--surface-2); border:1px solid var(--line-3); border-radius:6px;
   padding:4px 8px; font-size:12.5px; word-break:break-all; }
 .timeline li { position:relative; padding:0 0 14px 18px; border-left:1px solid var(--line-2); }
 .timeline li:before { content:""; position:absolute; left:-4px; top:6px; width:7px; height:7px;
@@ -366,6 +366,31 @@ pre { margin:12px 0; padding:12px 14px; background:var(--surface-3);
   body { background:#fff; }
   .card, table, .kpi { border-color:#000; }
   a { text-decoration:none; color:#000; }
+}
+"""
+
+# Final shared rules also cover older setup/login snippets from dashboard.CSS.
+THEME_CSS += """
+.wiz, .wiz .head, .wiz .box, .login, .login-box, details, .settings-section {
+  background:var(--surface); color:var(--ink); border-color:var(--line); }
+.step .num, .wiz .logo, .step .logo { background:var(--accent); color:#111; }
+code, pre, .share-links code { background:var(--surface-2); color:var(--accent); }
+.status, .burger, .howto span { background:var(--surface-2); color:var(--ink); }
+.hero, .flash, .warnbox { background:var(--surface); border-color:var(--line-2); }
+img, video { max-width:100%; }
+.card, .box, .content, main, .wiz { min-width:0; overflow-wrap:anywhere; }
+.table-wrap { max-width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+@media(max-width:600px) {
+  body { overflow-x:hidden; }
+  input, select, textarea { font-size:16px; min-height:44px; }
+  button, a.btn { min-height:44px; }
+  .wiz { width:calc(100% - 24px); margin:16px auto; padding:16px; }
+  .wiz .head { padding:12px 0; }
+  .row { gap:8px; }
+  .row > input, .row > select { max-width:100%; }
+  .page-heading, .topbar { flex-wrap:wrap; gap:12px; }
+  .grid, .kpis, .settings-grid { grid-template-columns:minmax(0,1fr); }
+  table { display:block; overflow-x:auto; max-width:100%; }
 }
 """
 

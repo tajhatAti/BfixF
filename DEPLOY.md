@@ -2,7 +2,7 @@
 
 ## 🧭 কমান্ডে উত্তর নেই? আগে চলমান build ও পরিচয় যাচাই
 
-এই সংস্করণের পরিচয়: `desi-2026.10.18-command-recovery / <কোডের hash>`।
+এই সংস্করণের পরিচয়: `desi-2026.10.18-group-join-recovery / <কোডের hash>`।
 Telegram বট মূল নিয়ন্ত্রণ, ওয়েবসাইট পাশাপাশি চলবে। পুরোনো DB/backup, প্রকাশিত
 ফাইল/লিংক ও ID বদলানোর প্রয়োজন নেই। শুধু নতুন কোড দিয়ে পুরোনো ডেটা রেখে restart করুন।
 
@@ -15,8 +15,8 @@ Telegram বট মূল নিয়ন্ত্রণ, ওয়েবসা�
 3. সেই একই bot username-এর ব্যক্তিগত চ্যাটে `/whoami` দিন। এটি সবার নিজের ID,
    কার্যকর admin permission ও চলমান build দেখাবে; কোনো token/session দেখাবে না।
 4. মালিক হিসেবে `/version`, `/help`, `/status`, `/downloads` দিন। `/help` অ্যাডমিনকে
-   সম্পূর্ণ কমান্ড তালিকা দেয়; অন্যদের সাধারণ সাহায্য। Telegram-এর সাধারণ command menu-তে
-   শুধু start/help; ব্যক্তিগত admin scope-এ admin command menu বসানো হয়। Telegram menu
+   সম্পূর্ণ কমান্ড তালিকা দেয়; অন্যদের সাধারণ সাহায্য। Telegram-এর সাধারণ ও ব্যক্তিগত admin command menu-তে
+   শুধু start থাকে; /help লিখে কমান্ড তালিকা নিতে হয়। Telegram menu
    সেট করতে না পারলেও লিখে `/help` দিলে তালিকা আসবে।
 5. `/whoami`-তে admin permission **নেই** দেখালে ID ও কার্যকর admin settings মিলিয়ে নিন।
    পুরোনো DB-এর সংরক্ষিত admin IDs config-এর ID-র চেয়ে অগ্রাধিকার পেতে পারে।
