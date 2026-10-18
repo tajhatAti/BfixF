@@ -63,7 +63,7 @@ def _store_message(store_id: int, title: str, chat_id: int, message, index: int)
 
 
 async def _run(admin_id: int, iterator, title: str, chat_id: int, store_id: int,
-               progress: ProgressCb | None) -> dict:
+               progress: ProgressCb | None, *, archive: bool = False) -> dict:
     scanned = found = 0
     start_scan(admin_id)
     try:
@@ -88,11 +88,16 @@ async def _run(admin_id: int, iterator, title: str, chat_id: int, store_id: int,
         # background — later clicks are plain bot sends, never Saved Messages.
         try:
             from app.runtime import spawn
-            from app.services.media_cache import warm_all
-            spawn(warm_all())
+            if not archive:
+                from app.services.media_cache import warm_all
+                spawn(warm_all())
         except Exception as exc:
             log.debug("could not start the media cache warm-up: %s", exc)
-    return {"scanned": scanned, "found": found, "title": title, "store_id": store_id}
+    if archive:
+        from app.services import video_copy
+        video_copy.enqueue(store_id, admin_id, chat_id)
+        video_copy.kick()
+    return {"copy_queued": archive, "scanned": scanned, "found": found, "title": title, "store_id": store_id}
 
 
 async def scan_with_session(admin_id: int, chat_id: int, title: str, store_id: int,
@@ -100,8 +105,17 @@ async def scan_with_session(admin_id: int, chat_id: int, title: str, store_id: i
     client = user_clients.get(admin_id)
     if client is None:
         raise RuntimeError("No userbot session connected")
-    iterator = client.iter_messages(chat_id, limit=None, reverse=True)
-    return await _run(admin_id, iterator, title, chat_id, store_id, progress)
+    from telethon import utils
+    from app.services.media_cache import _resolve_peer
+    try:
+        entity = await _resolve_peer(client, chat_id)
+    except Exception as exc:
+        log.warning("Scan source resolution failed: %s", exc)
+        raise RuntimeError("এই সেশনের অ্যাকাউন্ট দিয়ে চ্যানেলটি খোলা যাচ্ছে না। "
+                           "চ্যানেলে জয়েন করুন, তারপর সেশন দিয়ে আবার চ্যানেল বাছুন।") from exc
+    chat_id = utils.get_peer_id(entity)
+    iterator = client.iter_messages(entity, limit=None, reverse=True)
+    return await _run(admin_id, iterator, title, chat_id, store_id, progress, archive=True)
 
 
 async def scan_with_bot(admin_id: int, entity, title: str, store_id: int,

@@ -3998,6 +3998,19 @@ def create_app() -> FastAPI:
             f"/admin/channels?flash=✅+{esc(store['name'])}+এর+ক্যাশ+চ্যানেল+তৈরি+হলো",
             status_code=303)
 
+    @app.post("/admin/channels/store/{store_id}/copy/{action}")
+    async def admin_video_copy_control(request: Request, store_id: int, action: str):
+        blocked = _guard(request)
+        if blocked:
+            return blocked
+        from app.services import video_copy
+        if not db.store(store_id) or not video_copy.control(store_id, action):
+            return RedirectResponse("/admin/channels?warn=কপি+কাজটি+পাওয়া+যায়নি", status_code=303)
+        if action in ('resume', 'retry'):
+            video_copy.kick()
+        audit_service.record("video_copy_control", store_id=store_id, detail=action)
+        return RedirectResponse("/admin/channels?flash=কপি+সেটিং+সেভ+হয়েছে", status_code=303)
+
     @app.post("/admin/channels/store/{store_id}/cache/reset")
     async def admin_store_cache_reset(request: Request, store_id: int):
         """Forget a store's cache channel — the next mirror creates a fresh one.

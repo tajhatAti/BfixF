@@ -99,6 +99,22 @@ def store_channels_card() -> str:
             f"<form method=post action='/admin/channels/store/{store['id']}/cache/reset'>"
             f"<button class='bad'>♻️ রিসেট</button></form>"
             f"</div></td></tr>")
+    from app.services import video_copy
+    copy_cards = []
+    for store in db.all_stores():
+        if not video_copy.job(store['id']):
+            continue
+        controls = ''.join(
+            f"<form method='post' action='/admin/channels/store/{store['id']}/copy/{action}'>"
+            f"<button class='grey'>{label}</button></form>"
+            for action, label in [('pause', '⏸ বিরতি'), ('resume', '▶ চালান'),
+                                  ('stop', '⏹ বন্ধ'), ('retry', '♻ ব্যর্থগুলো আবার')])
+        problems = db._q("SELECT file_id,last_error FROM video_copy_items WHERE store_id=? "
+                         "AND last_error!='' ORDER BY file_id LIMIT 10", (store['id'],))
+        details = ''.join(f"<li>#{r['file_id']}: {esc(r['last_error'])}</li>" for r in problems)
+        copy_cards.append(f"<div class='card'>{video_copy.describe(store['id']).replace(chr(10), '<br>')}"
+                          f"<div class='row'>{controls}</div><ul>{details}</ul></div>")
+    copy_section = ''.join(copy_cards)
     return f"""
     <div class="page-heading"><div><p class="eyebrow">PER STORE</p>
       <h2>🏪 প্রতি স্টোরের আলাদা চ্যানেল</h2></div></div>
@@ -109,6 +125,7 @@ def store_channels_card() -> str:
     আবার বানিয়ে নিন।</p>
     <table><tr><th>স্টোর</th><th>ক্যাশ চ্যানেল</th><th>পাবলিশ চ্যানেল</th><th>অটো-পোস্ট</th><th></th></tr>
     {''.join(rows) or "<tr><td colspan=5 class='muted'>এখনো কোনো স্টোর নেই</td></tr>"}</table>
+    <h3>📥 স্ক্যানের পর ভিডিও কপি</h3>{copy_section}
     """
 
 

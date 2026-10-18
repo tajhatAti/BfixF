@@ -71,6 +71,8 @@ REGISTRY: list[Group] = [
             _s("PER_STORE_CHANNEL", "প্রতি স্টোরের জন্য আলাদা ক্যাশ চ্যানেল", "content",
                kind="bool", default=True,
                hint="প্রথম ভিডিও দিলেই সেশন দিয়ে চ্যানেল খুলে সেখানে আপলোড হবে"),
+            _s("VIDEO_COPY_DELAY", "ভিডিও কপির মধ্যে বিরতি (সেকেন্ড)", "content",
+               kind="int", default=4, hint="স্ক্যানের পর সর্বোচ্চ ৩টি ভিডিও একসঙ্গে; ৩–৩০ সেকেন্ড বিরতি"),
             _s("MIRROR_MAX_MB", "ক্যাশ করার সর্বোচ্চ ফাইল সাইজ (MB)", "content",
                kind="int", default=1900,
                hint="এর চেয়ে বড় ফাইল বট সরাসরি পাঠাবে না (সেশন লাগবে)"),

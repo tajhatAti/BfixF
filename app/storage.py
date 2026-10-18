@@ -21,6 +21,30 @@ from app.logger import log
 from app.utils import slugify, unique_keep_order
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS video_copy_lease (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    owner TEXT NOT NULL,
+    until REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS video_copy_jobs (
+    store_id INTEGER PRIMARY KEY,
+    admin_id INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'queued',
+    chat_id INTEGER DEFAULT 0,
+    message_id INTEGER DEFAULT 0,
+    updated_at REAL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS video_copy_items (
+    store_id INTEGER NOT NULL,
+    file_id INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    ready_at REAL DEFAULT 0,
+    last_error TEXT DEFAULT '',
+    PRIMARY KEY(store_id, file_id)
+);
+CREATE INDEX IF NOT EXISTS video_copy_due ON video_copy_items(state, ready_at, store_id);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT

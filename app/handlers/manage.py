@@ -351,7 +351,8 @@ async def run_session_scan(event, admin_id: int, chat_id: int, title: str,
         result = await scanner.scan_with_session(admin_id, chat_id, title, store["id"], progress)
     except Exception as exc:
         log.exception("scan failed: %s", exc)
-        await status.edit(f"❌ Scan failed: <code>{esc(str(exc)[:200])}</code>")
+        await status.edit("❌ স্ক্যান করা যায়নি। সেশন কানেক্ট আছে এবং এই অ্যাকাউন্টটি "
+                          "সোর্স চ্যানেলে আছে কি না দেখুন, তারপর আবার চ্যানেল বাছুন।")
         return
     await _scan_finished(status, store, result)
 
@@ -362,7 +363,9 @@ async def _scan_finished(status, store: dict, result: dict) -> None:
         f"🏪 Store: <b>{esc(store['name'])}</b>\n"
         f"📄 Messages scanned: <code>{result['scanned']}</code>\n"
         f"🎬 New files added: <code>{result['found']}</code>\n"
-        "<i>Duplicates are skipped automatically.</i>",
+        + ("<i>Duplicates are skipped automatically.</i>" +
+         ("\n📥 ভিডিও কপি নিজে থেকেই শুরু হচ্ছে। আলাদা মেসেজে অগ্রগতি ও বিরতির বাটন পাবেন।"
+          if result.get("copy_queued") else "")),
         buttons=[
             [Button.inline("🗂 Open store files", f"fms:{store['id']}")],
             [Button.inline("🛠 Store settings", f"sss:{store['id']}")],
@@ -713,3 +716,26 @@ async def file_broadcast_test(event, rest: str) -> None:
     result = await deliver_file_id(admin_id, safe_int(rest))
     await event.answer("🧪 পাঠানো হয়েছে!" if result.ok
                        else f"❌ পাঠানো যায়নি ({result.reason})", alert=True)
+
+
+@route("vc:")
+async def video_copy_control(event, rest: str) -> None:
+    from app.services import video_copy
+    if not access.is_admin(event.sender_id):
+        await event.answer("শুধু অ্যাডমিনের জন্য", alert=True)
+        return
+    parts = rest.split(":")
+    if len(parts) != 2 or not parts[1].isdigit():
+        return
+    action, store_id = parts[0], int(parts[1])
+    store = db.store(store_id)
+    if not store or (store['admin_id'] != event.sender_id and event.sender_id not in cfg.ADMIN_IDS):
+        await event.answer("এই স্টোরে অনুমতি নেই", alert=True)
+        return
+    if not video_copy.control(store_id, action):
+        await event.answer("কপি কাজটি পাওয়া যায়নি", alert=True)
+        return
+    await event.answer("✅ পরিবর্তন সেভ হয়েছে")
+    await event.edit(video_copy.describe(store_id), buttons=video_copy.buttons(store_id))
+    if action in ('resume', 'retry'):
+        video_copy.kick()

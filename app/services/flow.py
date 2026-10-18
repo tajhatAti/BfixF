@@ -134,13 +134,14 @@ async def _delivery_error(chat: int, result, user_id: int) -> None:
     from app.services.sender import FLOOD, NO_SESSION
     from app import texts
     if result.reason == NO_SESSION:
-        message = texts.SESSION_NEEDED
+        message = "⏳ ভিডিওটা প্রস্তুত হচ্ছে। একটু পরে আবার চেষ্টা করুন।"
     elif result.reason == FLOOD:
         message = texts.FLOOD_WAIT
     else:
-        message = texts.NOT_FOUND
-    if access.is_admin(user_id) and result.detail:
-        message += f"\n<code>{esc(result.detail)}</code>"
+        message = "⏳ ভিডিওটা এখন প্রস্তুত করা যায়নি। একটু পরে আবার চেষ্টা করুন।"
+    if result.detail:
+        from app.logger import log as logger
+        logger.warning("Media delivery failed (%s): %s", result.reason, result.detail)
     await sender.send_text(chat, message)
 
 

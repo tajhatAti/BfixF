@@ -315,16 +315,18 @@ async def mirror_loop() -> None:
     await asyncio.sleep(45)                       # let the bot settle after boot
     while True:
         try:
+            from app.services import video_copy
+            video_copy.kick()
             if not db.missing_mirrors(1):
-                await asyncio.sleep(900)
+                await asyncio.sleep(20)
                 continue
             result = await warm_mirrors(limit=8, delay=2.0)
             if result["mirrored"]:
                 log.info("Media cache: %s file(s) mirrored, %s waiting",
-                         result["mirrored"], result["missing"])
+                         result["mirrored"], result["ready"]["missing"])
         except Exception as exc:                  # never let a worker die
             log.error("mirror loop error: %s", exc)
-        await asyncio.sleep(120)
+        await asyncio.sleep(20)
 
 
 async def digest_loop() -> None:

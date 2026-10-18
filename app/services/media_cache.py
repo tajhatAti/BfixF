@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import tempfile
 
 from telethon import utils
@@ -43,6 +44,7 @@ from app.storage import db
 
 CHUNK = 1024 * 1024
 MAX_RANGED_THREADS = 4
+_reserved_downloads: dict[int, int] = {}
 
 
 def _owner_session(file_row: dict, store: dict | None):
@@ -202,7 +204,8 @@ async def _resolve_peer(client, peer):
     session's own cache → a full dialog walk. Every success is remembered, so the
     next restart needs none of it.
     """
-    cached = peers.chat_entity(peer) if isinstance(peer, (int, str)) and str(peer).lstrip("-").isdigit() else None
+    cached = peers.chat_entity(peer) if (isinstance(peer, (int, str))
+        and str(peer).lstrip("-").isdigit() and int(peer) < 0) else None
     if cached is not None:
         try:
             return cached
@@ -277,6 +280,8 @@ async def _create_cache_channel(client, title: str, about: str, remember: bool =
         await asyncio.sleep(2)
         log.info("Created the private cache channel %s (%s)", peer_id, title)
         return peer_id
+    except FloodWaitError:
+        raise
     except Exception as exc:
         log.error("Could not create the cache channel %r: %s - set STORAGE_CHANNEL "
                   "by hand (a private channel where the bot is admin).", title, exc)
@@ -297,17 +302,18 @@ def _store_meta_key(store_id) -> str:
     return f"store_cache_channel:{int(store_id)}"
 
 
-async def store_cache_peer(client, store: dict | None):
+async def store_cache_peer(client, store: dict | None, *, dedicated: bool = False):
     """One private cache channel per store, created once by the owner's session.
 
     The videos of a store are copied there (no caption, so no foreign tags) and every
     user delivery is a plain bot send from that copy. Off when the panel's
     STORAGE_CHANNEL is set by hand or the PER_STORE_CHANNEL setting is switched off.
     """
-    if not store or settings.get_str("STORAGE_CHANNEL"):
+    if not store or (not dedicated and settings.get_str("STORAGE_CHANNEL")):
         return None
-    if not settings.get_bool("PER_STORE_CHANNEL", True):
+    if not dedicated and not settings.get_bool("PER_STORE_CHANNEL", True):
         return None
+    bound = db.impl
     key = _store_meta_key(store["id"])
     known = _as_peer(db.get_meta(key, ""))
     if known is not None:
@@ -320,8 +326,10 @@ async def store_cache_peer(client, store: dict | None):
             client, f"{str(store.get('name') or 'Store')[:80]} - media",
             f"Auto-created for the store '{store.get('name')}'. Videos live here once. Do not delete.",
             remember=True)
-        if peer_id:
+        if peer_id and db.impl is bound:
             db.set_meta(key, str(peer_id))
+        elif db.impl is not bound:
+            return None
         return peer_id
 
 
@@ -435,9 +443,12 @@ async def _media_from(client, chat_id: int, msg_id: int):
     msg = None
     for attempt in (1, 2):
         try:
-            msg = await safe_call(client.get_messages, chat_id, ids=msg_id,
+            peer = await _resolve_peer(client, chat_id)
+            msg = await safe_call(client.get_messages, peer, ids=msg_id,
                                   what="mirror_fetch", retries=1)
             break
+        except FloodWaitError:
+            raise
         except Exception as exc:
             if attempt == 1 and _is_entity_error(exc) and await _load_dialogs(client, force=True):
                 continue                      # the cache was empty — retry once with it filled
@@ -457,43 +468,55 @@ async def _download(client, message, path: str, size: int | None = None) -> bool
         if size and size > 5 * CHUNK:
             await _download_ranged(client, message, path, size)
             return os.path.exists(path) and os.path.getsize(path) > 0
+    except FloodWaitError:
+        raise
     except Exception as exc:
         log.debug("ranged download failed (%s) — falling back", exc)
     try:
-        await client.download_media(message, file=path)
+        await safe_call(client.download_media, message, file=path, what="mirror_download", retries=1)
         return os.path.exists(path) and os.path.getsize(path) > 0
+    except FloodWaitError:
+        raise
     except Exception as exc:
         log.warning("download failed: %s", exc)
         return False
 
 
 async def _download_ranged(client, message, path: str, size: int) -> None:
-    """Chunked parallel download (the trick from the owner's own forwarder).
+    """Bounded aligned ranges; Telegram's limit counts chunks, not bytes.
 
-    Telethon serialises `iter_download` per client, so the parallelism comes from
-    splitting the file into ranges that are written at their own offsets.
+    Never preallocate and call a partial file a successful download. Each range
+    verifies its exact byte count, otherwise the caller retries a normal download.
     """
+    block = 512 * 1024
     parts = max(1, min(MAX_RANGED_THREADS, max(1, size // (20 * CHUNK))))
-    chunk = size // parts
+    span = ((size + parts - 1) // parts + block - 1) // block * block
 
-    lock = asyncio.Lock()
+    async def fetch(start: int, end: int) -> None:
+        written = 0
+        with open(path, "r+b") as handle:
+            async for blob in client.iter_download(message.media, offset=start,
+                                                   request_size=block):
+                blob = blob[:end - start - written]
+                handle.seek(start + written)
+                handle.write(blob)
+                written += len(blob)
+                if start + written >= end:
+                    break
+        if written != end - start:
+            raise IOError("Incomplete media download")
 
-    async def fetch(start: int, length: int) -> None:
-        handle = await asyncio.to_thread(open, path, "r+b")
-        try:
-            async for blob in client.iter_download(message.media, offset=start, limit=length,
-                                                   chunk_size=CHUNK, request_size=CHUNK):
-                async with lock:
-                    await asyncio.to_thread(_write_at, handle, start, blob)
-                start += len(blob)
-        finally:
-            await asyncio.to_thread(handle.close)
-
-    # Pre-allocate so every worker writes at its own offset.
-    with open(path, "wb") as handle:
-        handle.truncate(size)
-    await asyncio.gather(*[fetch(i * chunk, chunk if i < parts - 1 else size - i * chunk)
-                           for i in range(parts)])
+    with open(path, "wb"):
+        pass
+    tasks = [asyncio.create_task(fetch(start, min(size, start + span)))
+             for start in range(0, size, span)]
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 def _write_at(handle, offset: int, blob: bytes) -> None:
@@ -502,7 +525,18 @@ def _write_at(handle, offset: int, blob: bytes) -> None:
     handle.flush()
 
 
-async def ensure_mirror(file_row: dict, store: dict | None = None, force: bool = False) -> dict:
+def is_archived(file_row: dict, store: dict | None = None) -> bool:
+    """A source-as-mirror/shared legacy channel is not this store's archive."""
+    store_id = (store or {}).get('id') or file_row.get('store_id')
+    if not store_id or not file_row.get('mirror_msg'):
+        return False
+    target = _as_peer(db.get_meta(_store_meta_key(store_id), ''))
+    return (isinstance(target, int) and target != file_row.get('chat_id')
+            and target == file_row.get('mirror_chat'))
+
+
+async def ensure_mirror(file_row: dict, store: dict | None = None, force: bool = False,
+                        *, archive: bool = False) -> dict:
     """Make sure the bot can send this file. Returns the (possibly updated) row.
 
     One lock per file: 50 people clicking the same new video create **one** copy,
@@ -510,29 +544,33 @@ async def ensure_mirror(file_row: dict, store: dict | None = None, force: bool =
     """
     if file_row is None:
         return {}
-    if file_row.get("mirror_chat") and file_row.get("mirror_msg") and not force:
+    if file_row.get("mirror_chat") and file_row.get("mirror_msg") and not force and (
+            not archive or is_archived(file_row, store)):
         return file_row
     lock = _file_locks.setdefault(int(file_row["id"]), asyncio.Lock())
     async with lock:
         fresh = db.file(file_row["id"]) or file_row
-        if fresh.get("mirror_chat") and fresh.get("mirror_msg") and not force:
+        if fresh.get("mirror_chat") and fresh.get("mirror_msg") and not force and (
+                not archive or is_archived(fresh, store)):
             return fresh
         try:
-            return await _ensure_mirror_locked(fresh, store, force)
+            return await _ensure_mirror_locked(fresh, store, force, archive=archive)
         finally:
             if not lock.locked():
                 _file_locks.pop(int(file_row["id"]), None)
 
 
-async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool) -> dict:
+async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool,
+                                *, archive: bool = False) -> dict:
 
+    repository = db.impl
     # 1. Maybe the source itself is already bot-readable — then no mirror needed.
     try:
         from app.runtime import bot
-        msg = await _media_from(bot, file_row["chat_id"], file_row["msg_id"])
+        msg = None if archive else await _media_from(bot, file_row["chat_id"], file_row["msg_id"])
         if msg is not None:
-            db.set_mirror(file_row["id"], file_row["chat_id"], file_row["msg_id"])
-            return db.file(file_row["id"]) or file_row
+            repository.set_mirror(file_row["id"], file_row["chat_id"], file_row["msg_id"])
+            return repository.file(file_row["id"]) or file_row
     except Exception as exc:
         log.debug("source not readable by the bot: %s", exc)
 
@@ -540,8 +578,8 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool)
     if client is None:
         _note(file_row["id"], "ইউজারবট সেশন কানেক্ট নেই — ড্যাশবোর্ড/বট থেকে অ্যাডমিন সেশন কানেক্ট করুন")
         return file_row
-    peer = await store_cache_peer(client, store)
-    if peer is None:
+    peer = await store_cache_peer(client, store, dedicated=True) if archive else await store_cache_peer(client, store)
+    if peer is None and not archive:
         peer = await storage_peer(client)
     if peer is None:
         _note(file_row["id"], "ক্যাশ চ্যানেল বানানো যায়নি — একটা প্রাইভেট চ্যানেল বানিয়ে "
@@ -567,8 +605,9 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool)
     source = await _media_from(client, int(file_row["chat_id"]), int(file_row["msg_id"]))
     if source is None:
         why = _fetch_errors.get((int(file_row["chat_id"]), int(file_row["msg_id"])), "")
-        _note(file_row["id"], f"ইউজারবট আসল ভিডিওটা ({file_row['chat_id']}) পড়তে পারছে না — "
-                              f"এই সেশনের একাউন্ট কি ওই চ্যানেলে আছে? ({why[:90]})")
+        log.warning("Source read failed for file %s: %s", file_row["id"], why)
+        _note(file_row["id"], "এই সেশনের অ্যাকাউন্ট চ্যানেলটি পড়তে পারছে না। "
+                              "চ্যানেলে জয়েন করুন বা সেশন থেকে সঠিক চ্যানেলটি আবার বাছুন।")
         return file_row
 
     size = int(getattr(getattr(source, "file", None), "size", 0) or file_row.get("bytes") or 0)
@@ -577,61 +616,100 @@ async def _ensure_mirror_locked(file_row: dict, store: dict | None, force: bool)
         _note(file_row["id"], f"ফাইলটা {size // (1024 * 1024)} MB — MIRROR_MAX_MB ({max_mb}) এর চেয়ে বড়")
         return file_row
 
-    # 2. Try a cheap in-app copy (Telegram side, no download)…
+    # 2. Try forwarding before downloading; protected sources reject this.
     try:
         from app.runtime import bot
-        copied = await safe_call(client.send_file, peer, source.media,
-                                 what="mirror_copy", retries=1)
+        if archive:
+            source_peer = await _resolve_peer(client, int(file_row["chat_id"]))
+            copied = await safe_call(client.forward_messages, peer, source.id,
+                                     from_peer=source_peer, what="mirror_forward", retries=1)
+            if isinstance(copied, list):
+                copied = copied[0] if copied else None
+        else:
+            copied = await safe_call(client.send_file, peer, source.media,
+                                     what="mirror_copy", retries=1)
         if copied is not None and getattr(copied, "media", None):
             _problems.pop(int(file_row["id"]), None)
             peers.remember_from_message(copied)
-            db.set_mirror(file_row["id"], _mirror_chat_id(copied, peer), int(copied.id))
+            repository.set_mirror(file_row["id"], _mirror_chat_id(copied, peer), int(copied.id))
             log.info("mirrored file %s → %s/%s (copy)", file_row["id"],
                      _mirror_chat_id(copied, peer), copied.id)
-            return db.file(file_row["id"]) or file_row
+            return repository.file(file_row["id"]) or file_row
     except FloodWaitError:
         raise
     except Exception as exc:
         log.debug("in-app mirror copy failed for %s: %s", file_row["id"], exc)
 
     # 3. …otherwise download and re-upload (works for restricted/forward-protected).
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".bin")
+    tmp = tempfile.NamedTemporaryFile(delete=False, prefix="bfixf-copy-",
+                                      suffix=".mp4" if file_row.get("kind") == "Video" else ".bin")
+    thumb_path = None
     tmp.close()
     try:
+        free = shutil.disk_usage(os.path.dirname(tmp.name)).free
+        required = size or max_mb * 1024 * 1024 or 2 * 1024 ** 3
+        if required + sum(_reserved_downloads.values()) + 64 * 1024 * 1024 > free:
+            _note(file_row['id'], "সার্ভারে পর্যাপ্ত ফাঁকা ডিস্ক নেই — ডিস্ক ফাঁকা করে আবার চেষ্টা করুন")
+            return file_row
+        _reserved_downloads[int(file_row['id'])] = required
         if not await _download(client, source, tmp.name, size or None):
             _note(file_row["id"], "ভিডিও ডাউনলোড করা যায়নি (নেটওয়ার্ক/ফাইল সমস্যা)")
             return file_row
         # Keep the bytes we just downloaded: the website player can then serve this
         # file instantly (and even while Telegram is unreachable) — see store_bytes.
+        if not archive and os.path.getsize(tmp.name) <= _max_cache_bytes():
+            try:
+                with open(tmp.name, "rb") as handle:
+                    store_bytes(file_row, handle.read())
+            except OSError as exc:
+                log.debug("caching the downloaded mirror failed: %s", exc)
+        # Preserve the source's duration, dimensions and filename attributes.
+        attributes = getattr(getattr(source, "document", None), "attributes", None)
         try:
-            with open(tmp.name, "rb") as handle:
-                store_bytes(file_row, handle.read())
-        except OSError as exc:
-            log.debug("caching the downloaded mirror failed: %s", exc)
+            thumb_file = tempfile.NamedTemporaryFile(delete=False, prefix="bfixf-copy-", suffix=".jpg")
+            thumb_path = thumb_file.name
+            thumb_file.close()
+            await safe_call(client.download_media, source, file=thumb_path, thumb=-1,
+                            what="mirror_thumb", retries=1)
+            if not os.path.getsize(thumb_path):
+                os.unlink(thumb_path)
+                thumb_path = None
+        except FloodWaitError:
+            raise
+        except Exception:
+            if thumb_path:
+                try:
+                    os.unlink(thumb_path)
+                except OSError:
+                    pass
+            thumb_path = None
         sent = await safe_call(
             client.send_file, peer, tmp.name,
             caption=clean_text(file_row.get("name") or "")[:200],
             supports_streaming=file_row.get("kind") == "Video",
-            attributes=None,
+            attributes=attributes, thumb=thumb_path, force_document=False,
             what="mirror_upload", retries=1,
         )
         if sent is not None and getattr(sent, "media", None):
             _problems.pop(int(file_row["id"]), None)
             peers.remember_from_message(sent)
-            db.set_mirror(file_row["id"], _mirror_chat_id(sent, peer), int(sent.id))
-            db.set_file_bytes(file_row["id"], os.path.getsize(tmp.name))
+            repository.set_mirror(file_row["id"], _mirror_chat_id(sent, peer), int(sent.id))
+            repository.set_file_bytes(file_row["id"], os.path.getsize(tmp.name))
             log.info("mirrored file %s → %s/%s (re-upload, %.1f MB)", file_row["id"],
                      _mirror_chat_id(sent, peer), sent.id, os.path.getsize(tmp.name) / 1048576)
-            return db.file(file_row["id"]) or file_row
+            return repository.file(file_row["id"]) or file_row
     except FloodWaitError:
         raise
     except Exception as exc:
         log.warning("mirror upload failed for %s: %s", file_row["id"], exc)
     finally:
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
+        _reserved_downloads.pop(int(file_row['id']), None)
+        for path in (tmp.name, thumb_path):
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
     return file_row
 
 
@@ -650,7 +728,9 @@ async def warm_mirrors(limit: int = 20, delay: float = 1.5) -> dict:
     async with _warm_lock:
         now = time.time()
         rows = [r for r in db.missing_mirrors(limit * 6)
-                if now - _failed_recent.get(int(r["id"]), 0) > 3600][:limit]
+                if now - _failed_recent.get(int(r["id"]), 0) > 3600
+                and not db._one("SELECT 1 FROM video_copy_items WHERE file_id=? AND store_id=?",
+                                (r['id'], r['store_id']))][:limit]
         for row in rows:
             try:
                 updated = await ensure_mirror(row, db.store(row["store_id"]))

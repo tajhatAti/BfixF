@@ -161,13 +161,13 @@ async def deliver_to_user(event, user_id: int, file_row: dict,
         return True
 
     if result.reason == NO_SESSION:
-        message = texts.SESSION_NEEDED
+        message = "⏳ ভিডিওটা প্রস্তুত হচ্ছে। একটু পরে আবার চেষ্টা করুন।"
     elif result.reason == FLOOD:
         message = texts.FLOOD_WAIT
     else:
-        message = texts.NOT_FOUND
-    if access.is_admin(user_id) and result.detail:
-        message += f"\n<code>{esc(result.detail)}</code>"
+        message = "⏳ ভিডিওটা এখন প্রস্তুত করা যায়নি। একটু পরে আবার চেষ্টা করুন।"
+    if result.detail:
+        log.warning("Media delivery failed (%s): %s", result.reason, result.detail)
     await event.respond(message)
     return False
 
