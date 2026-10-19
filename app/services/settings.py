@@ -61,6 +61,16 @@ def _s(key: str, label: str, group: str, **kwargs) -> Setting:
 # ------------------------------------------------------------------- registry
 REGISTRY: list[Group] = [
     Group(
+        key="autodelete", label="ইনবক্স থেকে ভিডিও ডিলিট", icon="🗑",
+        blurb="বট ইউজারের ইনবক্সে যে ভিডিও পাঠায় তা কতক্ষণ পর মুছে যাবে। ঘণ্টায় লিখুন "
+              "(যেমন ২৪ বা ০.৫)। ০ = কখনো মুছবে না। গ্রুপের ভিডিও মোছা হয় না।",
+        settings=[
+            _s("AUTO_DELETE_USER_HOURS", "সাধারণ ইউজার — কত ঘণ্টা পর ডিলিট (০ = বন্ধ)", "autodelete", kind="float", default=24.0),
+            _s("AUTO_DELETE_PREMIUM_HOURS", "প্রিমিয়াম ইউজার — কত ঘণ্টা পর ডিলিট (০ = কখনো না)", "autodelete", kind="float", default=0.0),
+            _s("AUTO_DELETE_ADMIN_HOURS", "অ্যাডমিন — কত ঘণ্টা পর ডিলিট (০ = কখনো না)", "autodelete", kind="float", default=0.0),
+        ],
+    ),
+    Group(
         key="emergency", label="জরুরি সেটিংস (Emergency)", icon="🚨",
         blurb="যেসব জিনিস বিগড়ালে ভিডিও বা বট আটকে যায় — সব এক জায়গায়। "
               "সমস্যা হলে আগে এখানে দেখুন (দ্রুত বাটনের জন্য: /admin/emergency)।",
@@ -103,7 +113,7 @@ REGISTRY: list[Group] = [
               "@username বা চ্যানেল আইডি — যেকোনোটা চলবে।",
         settings=[
             _s("GROUP_PROMO_ENABLED", "গ্রুপে /start দিলে ফ্রি ভিডিও", "force_join", kind="bool", default=True),
-            _s("GROUP_PROMO_COOLDOWN", "একই গ্রুপে ভিডিওর বিরতি (সেকেন্ড)", "force_join", kind="int", default=60),
+            _s("GROUP_PROMO_GAP", "গ্রুপে প্রতি ভিডিওর মাঝের সময় (সেকেন্ড) — সবাই সিরিয়ালে পাবে", "force_join", kind="int", default=10),
             _s("GROUP_PROMO_URL", "প্রমোশন বাটনে নিজের গ্রুপের লিংক", "force_join", placeholder="https://t.me/yourgroup"),
             _s("FORCE_JOIN_ENABLED", "জয়েন বাধ্যতামূলক", "force_join", kind="bool",
                default=True, hint="বন্ধ করলে কেউ আটকাবে না"),

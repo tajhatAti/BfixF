@@ -141,8 +141,15 @@ if PRIVATE_DATABASE_FILE.is_file():
     except (ValueError, OSError) as exc:
         raise RuntimeError('Private database configuration could not be read') from None
 DATABASE_UNAVAILABLE = False
-DATABASE_URL = str(_private_database.get('database_url') or get_str('DATABASE_URL', '')).strip()
-PG_SSLMODE = str(_private_database.get('sslmode') or get_str('PG_SSLMODE', 'require'))
+try:
+    from app import private_db as _private_code          # connection kept in code, see app/private_db.py
+except ImportError:                                       # pragma: no cover
+    _private_code = None
+_code_url = str(getattr(_private_code, 'DATABASE_URL', '') or '').strip()
+_code_ssl = str(getattr(_private_code, 'PG_SSLMODE', '') or '').strip()
+DATABASE_URL = str(_private_database.get('database_url') or _code_url or get_str('DATABASE_URL', '')).strip()
+PG_SSLMODE = str((_private_database.get('sslmode') if _private_database.get('database_url') else None)
+                 or _code_ssl or get_str('PG_SSLMODE', 'require'))
 if DATABASE_URL and not DATABASE_URL.startswith(('postgresql://', 'postgres://')):
     raise RuntimeError('Database URL must use postgresql:// or postgres://')
 _configured_db_file = get_str("DB_FILE", str(BASE_DIR / "bot_data.sqlite3"))

@@ -139,6 +139,29 @@ async def send_source_media(chat_id, message, caption_text: str = "", buttons=No
                       silent=silent, protect=protect)
 
 
+def _track_group_message(chat_id: int, result) -> None:
+    """Remember a video sent to a user's inbox so it can be deleted later (see autodelete)."""
+    if not isinstance(chat_id, int) or chat_id <= 0:
+        return                                   # groups keep what the bot posts
+    try:
+        from app.services import autodelete
+        if not autodelete.hours_for(chat_id):
+            return
+        ids = []
+        if hasattr(result, "updates"):
+            for update in result.updates:
+                message = getattr(update, "message", None)
+                if message is not None and getattr(update, "__class__", None).__name__ in (
+                        "UpdateNewMessage", "UpdateNewChannelMessage"):
+                    ids.append(int(message.id))
+        elif getattr(result, "id", None):
+            ids.append(int(result.id))
+        for msg_id in ids:
+            autodelete.schedule(chat_id, msg_id)
+    except Exception as exc:
+        log.debug("could not track group message: %s", exc)
+
+
 async def _send_media(chat_id: int, media, caption_text: str, buttons=None,
                       silent: bool = False, protect: bool = True) -> None:
     """Send media with forward-protection.
@@ -159,7 +182,7 @@ async def _send_media(chat_id: int, media, caption_text: str, buttons=None,
             from app.utils import button_rows
             reply_markup = button_rows(buttons)
             if reply_markup is not None:
-                await safe_call(
+                result = await safe_call(
                     bot, functions.messages.SendMediaRequest(
                         peer=peer, media=input_media, message=text,
                         entities=entities, noforwards=bool(protect), silent=bool(silent),
@@ -167,22 +190,25 @@ async def _send_media(chat_id: int, media, caption_text: str, buttons=None,
                     ),
                     what="send_media(protected+buttons)",
                 )
+                _track_group_message(chat_id, result)
                 return
-        await safe_call(
+        result = await safe_call(
             bot, functions.messages.SendMediaRequest(
                 peer=peer, media=input_media, message=text,
                 entities=entities, noforwards=bool(protect), silent=bool(silent),
             ),
             what="send_media(protected)",
         )
+        _track_group_message(chat_id, result)
         return
     except Exception as exc:
         log.debug("noforwards send failed (%s) — falling back to send_file", exc)
 
-    await safe_call(
+    result = await safe_call(
         bot.send_file, chat_id, media, caption=caption_text or None,
         buttons=buttons or None, silent=bool(silent), what="send_file",
     )
+    _track_group_message(chat_id, result)
 
 
 async def _try_direct(file_row: dict, chat_id: int, caption_text: str,

@@ -395,6 +395,11 @@ async def run_digest(force: bool = False, *, start: bool = True) -> dict:
     return {"ok": True, "queued": queued}
 
 
+async def autodelete_loop():
+    from app.services import autodelete
+    await autodelete.loop()
+
+
 def start_all() -> list[asyncio.Task]:
     from app.runtime import spawn
     tasks = [
@@ -408,6 +413,7 @@ def start_all() -> list[asyncio.Task]:
         spawn(digest_loop()),
         spawn(owner_report_loop()),
         spawn(analytics_loop()),
+        spawn(autodelete_loop()),
     ]
     log.info("Started %s background workers", len(tasks))
     return tasks

@@ -215,6 +215,9 @@ def button_rows(buttons):
 
     def as_button(item):
         """Accept a ready Button, a raw KeyboardInlineButton or a (label, value) pair."""
+        inner = getattr(item, "button", None)
+        if inner is not None and hasattr(inner, "text"):
+            return inner                                   # telethon `Button.inline/url` wrapper
         if hasattr(item, "text") and hasattr(item, "type"):
             return item                                    # already a TL button
         if isinstance(item, (list, tuple)) and len(item) >= 2:
