@@ -57,10 +57,6 @@ class BackupError(RuntimeError):
 # ----------------------------------------------------------------- small helpers
 def _sqlite_bytes(path: str) -> bytes:
     """A consistent copy of the live database (WAL safe) as plain SQLite bytes."""
-    if str(path).startswith(('postgresql://', 'postgres://')):
-        if str(db.path) != str(path):
-            raise BackupError('Active database does not match snapshot source')
-        return db.conn.snapshot()
     src = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         dest = sqlite3.connect(":memory:")
@@ -79,8 +75,6 @@ def _counts(path_or_conn) -> dict:
     out: dict[str, int] = {}
     close = False
     conn = path_or_conn
-    if isinstance(conn, str) and conn.startswith(('postgresql://', 'postgres://')):
-        conn = db.conn
     if isinstance(conn, (str, Path)):
         try:
             conn = sqlite3.connect(str(conn))
@@ -147,8 +141,6 @@ def export_envelope(*, note: str = "") -> dict:
 def _has_credentials(path: str) -> bool:
     """Is the bot token/API keys inside this database (so the new host needs none)?"""
     try:
-        if str(path).startswith(('postgresql://', 'postgres://')):
-            return all(db.get_meta(key, '') for key in ('cred:BOT_TOKEN', 'cred:API_ID', 'cred:API_HASH'))
         conn = sqlite3.connect(str(path))
         try:
             rows = {row[0] for row in conn.execute(
@@ -709,19 +701,6 @@ def restore(data: bytes, *, source: str = "upload", keep_safety: bool = True) ->
     missing = [name for name in REQUIRED_TABLES if name not in tables]
     if missing:
         raise BackupError("এই ব্যাকআপটা এই বটের না — নেই: " + ", ".join(missing))
-
-    if getattr(db, 'backend', 'sqlite') == 'postgresql':
-        before = _counts(db.conn)
-        safety = safety_copy() if keep_safety else ''
-        try:
-            db.conn.import_sqlite(raw, replace=True)
-        except Exception as exc:
-            raise BackupError('PostgreSQL restore ব্যর্থ; আগের ডেটা অক্ষত আছে।') from exc
-        _clear_caches()
-        return {'ok': True, 'source': source, 'created_at_text': envelope.get('created_at_text', ''),
-                'checksum': envelope.get('checksum', ''), 'counts_before': before,
-                'counts_after': _counts(db.conn), 'safety_copy': safety,
-                'credentials_included': _has_credentials(str(db.path))}
 
     path = Path(str(db.path))
     before = _counts(path)

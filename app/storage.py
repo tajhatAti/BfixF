@@ -565,34 +565,19 @@ def _json_int_list(raw: Any) -> list[int]:
 class Database:
     def __init__(self, path: str):
         self.path = path
-        self.backend = 'postgresql' if str(path).startswith(('postgresql://', 'postgres://')) else 'sqlite'
-        if self.backend == 'postgresql':
-            from app.postgres import Connection
-            self.conn = Connection(path, SCHEMA, sslmode=getattr(cfg, 'PG_SSLMODE', 'require'))
-            try:
-                with self.conn.transaction():
-                    self.conn.raw.execute('SELECT pg_advisory_xact_lock(182861, 1)')
-                    self.conn.executescript(SCHEMA)
-                    self._upgrade()
-            except Exception:
-                self.conn.close()
-                raise
-        else:
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-            self.conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
-            self.conn.row_factory = sqlite3.Row
-            self.conn.execute("PRAGMA journal_mode=WAL")
-            self.conn.execute("PRAGMA synchronous=NORMAL")
-            self.conn.execute("PRAGMA busy_timeout=10000")
-            self.conn.executescript(SCHEMA)
-            self._upgrade()
-            self.conn.commit()
+        self.backend = 'sqlite'
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute("PRAGMA busy_timeout=10000")
+        self.conn.executescript(SCHEMA)
+        self._upgrade()
+        self.conn.commit()
 
     @property
     def display_path(self):
-        if self.backend == 'postgresql':
-            from urllib.parse import urlsplit
-            return 'PostgreSQL · ' + (urlsplit(self.path).hostname or '') + ' / bfixf'
         return self.path
 
     def _upgrade(self) -> None:
@@ -1521,10 +1506,7 @@ class Database:
                           encoding="utf-8")
         # copy the raw sqlite file too — it is the real backup
         try:
-            if self.backend == 'postgresql':
-                (directory_path / f"bot_data-{stamp}.sqlite3").write_bytes(self.conn.snapshot())
-            else:
-                shutil.copy2(self.path, directory_path / f"bot_data-{stamp}.sqlite3")
+            shutil.copy2(self.path, directory_path / f"bot_data-{stamp}.sqlite3")
         except Exception as exc:  # pragma: no cover
             log.warning("sqlite backup copy failed: %s", exc)
         backups = sorted(directory_path.glob("bot_data-*"))
@@ -2724,25 +2706,6 @@ class _LazyDB:
 
     def bind(self, path: str) -> Database:
         candidate = Database(path)
-        try:
-            if candidate.backend == 'postgresql' and str(path) == str(cfg.DB_FILE):
-                source = Path(getattr(cfg, 'SQLITE_BOOTSTRAP_FILE', 'bot_data.sqlite3'))
-                if source.is_file() and source.stat().st_size and not any(
-                        candidate._one(f'SELECT 1 FROM "{table}" LIMIT 1') for table in candidate.conn.metadata):
-                    # Startup runs before the bot/web workers. Import is transactional,
-                    # never deletes the source and refuses a populated destination.
-                    original = sqlite3.connect(f'file:{source}?mode=ro', uri=True)
-                    snapshot = sqlite3.connect(':memory:')
-                    try:
-                        original.backup(snapshot)
-                        candidate.conn.import_sqlite(snapshot.serialize())
-                        log.info('Existing SQLite database imported into PostgreSQL; original retained')
-                    finally:
-                        original.close()
-                        snapshot.close()
-        except Exception:
-            candidate.conn.close()
-            raise
         self._impl = candidate
         return self._impl
 

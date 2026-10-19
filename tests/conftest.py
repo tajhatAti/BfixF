@@ -68,8 +68,3 @@ def stub_bot():
                  "app.handlers.user"):
         import_module(name)
     return runtime.get_client()
-
-
-def pytest_addoption(parser):
-    parser.addoption('--postgres-test-url', default=None,
-                     help='Disposable PostgreSQL URL: tests empty ONLY its bfixf schema; never use production')

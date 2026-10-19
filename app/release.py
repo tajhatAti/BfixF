@@ -3,7 +3,7 @@ import hashlib
 from functools import lru_cache
 from pathlib import Path
 
-BUILD = 'desi-2026.10.18-supabase'
+BUILD = 'desi-2026.10.19-sqlite'
 
 
 @lru_cache(maxsize=1)

@@ -739,8 +739,6 @@ DB_FILE=preview.sqlite3 .venv/bin/python tools/seed_demo.py          # ডেম
 শিডিউল কলেন্ডার · ভিডিওর ভেতরে ওয়াটারমার্ক · বট-থেকে-বট মিরর (একাধিক বটে লোড ভাগ)।
 
 
-## Supabase / PostgreSQL — environment ছাড়াই
+## SQLite database
 
-এই release-এ `database.private.json` থেকে PostgreSQL connection নেওয়া যায়; `/setup`-এ
-configuration-file upload-ও আছে। পুরোনো SQLite ডেটা ও portable backup সমর্থিত আছে।
-নির্দেশনা ও সীমাবদ্ধতা: [SUPABASE_SETUP.md](SUPABASE_SETUP.md)।
+এই সংস্করণ SQLite-only। পুরোনো SQLite অথবা `.bfixf.gz` backup `/setup` বা Backup panel থেকে restore করুন। Hosting বদলালে SQLite database ও backups স্থায়ী disk-এ রাখুন।

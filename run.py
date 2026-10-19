@@ -127,36 +127,13 @@ async def web_worker() -> None:
 
 
 def initialize_database() -> bool:
-    try:
-        db.bind(cfg.DB_FILE)
-        cfg.DATABASE_UNAVAILABLE = False
-        return True
-    except Exception:
-        if not str(cfg.DB_FILE).startswith(('postgresql://', 'postgres://')):
-            raise
-        # Recovery UI only, never a second writable application database.
-        cfg.DATABASE_UNAVAILABLE = True
-        db.bind(':memory:')
-        log.exception('PostgreSQL unavailable; website is in database recovery mode')
-        return False
+    db.bind(cfg.DB_FILE)
+    return True
 
 
 async def run() -> int:
     tasks = []
-    if not initialize_database():
-        tasks.append(asyncio.create_task(web_worker()))
-        while cfg.DATABASE_UNAVAILABLE:
-            await asyncio.sleep(10)
-            if not cfg.DATABASE_UNAVAILABLE:
-                break
-            try:
-                from app import database_config
-                async with database_config.switch_lock():
-                    if cfg.DATABASE_UNAVAILABLE:
-                        await asyncio.to_thread(db.bind, cfg.DB_FILE)
-                        cfg.DATABASE_UNAVAILABLE = False
-            except Exception:
-                log.warning('PostgreSQL still unavailable; bot remains stopped')
+    initialize_database()
     imported = db.migrate_legacy(cfg.LEGACY_DB_FILE)
     if imported:
         log.info("Imported the legacy bot_db.json: %s", imported)

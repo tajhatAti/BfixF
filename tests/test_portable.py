@@ -309,3 +309,16 @@ def test_a_foreign_database_without_users_is_still_refused(install, tmp_path):
     conn.close()
     with pytest.raises(portable.BackupError):
         portable.inspect(open(path, "rb").read())
+
+
+def test_plain_sqlite_backup_restores_ids_hashes_and_settings(install, tmp_path):
+    raw = portable._sqlite_bytes(str(db.path))
+    assert raw.startswith(b'SQLite format 3\x00')
+    db.bind(str(tmp_path / 'restore-plain.sqlite3'))
+    report = portable.restore(raw, source='plain SQLite backup')
+    assert report['ok']
+    assert db.backend == 'sqlite'
+    assert db.user_peer(101)['access_hash'] == 550123
+    assert db.all_stores()[0]['id'] == install['id']
+    assert db.stats()['files'] == 2
+    assert settings.get_str('WEB_TITLE', '') == 'আমার স্টোর'

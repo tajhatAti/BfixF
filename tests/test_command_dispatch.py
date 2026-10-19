@@ -110,7 +110,7 @@ async def test_help_escapes_every_pending_prompt_on_new_client(client, prompt):
 @pytest.mark.parametrize('command,expected', [
     ('/downloads', 'লাইভ অবস্থা'), ('/restricted', 'Restricted download'),
     ('/reel', 'রিল'), ('/session@MyDesiBot', 'String Session'),
-    ('/version', 'desi-2026.10.18-supabase'), ('/whoami', str(OWNER)),
+    ('/version', 'desi-2026.10.19-sqlite'), ('/whoami', str(OWNER)),
     ('/status', 'Handlers:'), ('/bots', 'বটগুলো'), ('/brhelp', '/brsend'),
 ])
 async def test_commands_really_dispatch_after_cached_imports(client, command, expected):
@@ -229,7 +229,7 @@ async def test_startup_notice_and_private_telegram_menu_scopes(client, monkeypat
             return types.InputPeerUser(uid, 123)
     menu_client = MenuClient()
     await command_catalog.announce_and_install(menu_client)
-    assert 'desi-2026.10.18-supabase' in menu_client.messages[0][1]
+    assert 'desi-2026.10.19-sqlite' in menu_client.messages[0][1]
     assert 'MyDesiBot' in menu_client.messages[0][1]
     public = next(r for r in requests if isinstance(r.scope, types.BotCommandScopeDefault))
     assert [c.command for c in public.commands] == ['start']

@@ -2,7 +2,7 @@
 
 ## চালানোর আগে
 
-- নতুন build: `desi-2026.10.18-supabase / <hash>`। `/version` দিয়ে মিলিয়ে নিন।
+- নতুন build: `desi-2026.10.19-sqlite / <hash>`। `/version` দিয়ে মিলিয়ে নিন।
 - Telegram-এর command menu-তে শুধু `/start`। Admin-ও একই menu পাবেন। `/help` লিখলে
   পূর্ণ admin catalogue; সাধারণ ইউজার admin catalogue দেখবেন না। Help বাটন নিজে
   থেকে পূর্ণ admin list ঢেলে দেবে না। Startup notice-ও সংক্ষিপ্ত।
@@ -56,13 +56,9 @@ Setup/login/পুরোনো form surfaces-সহ black/yellow theme এবং
 16px inputs, table overflow ও single-column layout উন্নত করা হয়েছে। বাস্তব ফোনের
 browser ও live Telegram/network-এ deployment verification এখনও প্রয়োজন।
 
-## Database URL — PostgreSQL support
+## SQLite-only database
 
-এই সংস্করণে PostgreSQL adapter, পুরোনো SQLite bootstrap/import এবং PostgreSQL থেকে
-পুরোনো `.bfixf.gz` backup/restore যোগ হয়েছে। Environment variable দিতে হবে না:
-`database.private.json` অথবা `/setup`-এ private configuration upload করুন। বিস্তারিত:
-[SUPABASE_SETUP.md](SUPABASE_SETUP.md)। Supabase-এর public tables ছোঁয়া হয় না;
-অ্যাপের নিজস্ব `bfixf` schema ব্যবহার হয়। Live Supabase connection এখনও এখানে যাচাই হয়নি।
+পুরোনো SQLite ও `.bfixf.gz` backup সরাসরি restore করা যাবে। Remote database setup সরানো হয়েছে। Hosting-এ database ও backup folder স্থায়ী disk-এ রাখুন।
 
 Reference checked: Telethon's forwarding implementation documents that removing
 media captions requires dropping the author too:
